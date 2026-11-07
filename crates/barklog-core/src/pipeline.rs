@@ -200,7 +200,10 @@ pub fn analyze(
         let processed_ms = analyzer.processed_ms();
         if processed_ms >= reported_ms + PROGRESS_STEP_MS {
             reported_ms = processed_ms;
-            if !progress(Progress { processed_ms, total_ms }) {
+            if !progress(Progress {
+                processed_ms,
+                total_ms,
+            }) {
                 return Err(AnalyzeError::Cancelled);
             }
         }

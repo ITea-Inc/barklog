@@ -31,14 +31,16 @@ pub enum BarkLogError {
 
 impl From<barklog_store::StoreError> for BarkLogError {
     fn from(e: barklog_store::StoreError) -> Self {
-        BarkLogError::Storage { reason: e.to_string(),
+        BarkLogError::Storage {
+            reason: e.to_string(),
         }
     }
 }
 
 impl From<barklog_audio::AudioError> for BarkLogError {
     fn from(e: barklog_audio::AudioError) -> Self {
-        BarkLogError::Audio { reason: e.to_string(),
+        BarkLogError::Audio {
+            reason: e.to_string(),
         }
     }
 }
@@ -148,6 +150,8 @@ pub struct TimeBucket {
 pub struct SessionReport {
     pub id: i64,
     pub source_name: String,
+    /// Ссылка на исходный файл для прослушивания эпизодов, если она сохранена.
+    pub source_uri: Option<String>,
     pub started_at: Option<StartInfo>,
     pub duration_ms: u64,
     pub dog_ms: u64,
@@ -167,11 +171,12 @@ pub struct SessionReport {
 }
 
 impl SessionReport {
-    fn from_core(id: i64, r: core::Report) -> Self {
+    fn from_core(id: i64, r: core::Report, source_uri: Option<String>) -> Self {
         let s = r.stats;
         SessionReport {
             id,
             source_name: r.source.unwrap_or_default(),
+            source_uri,
             started_at: r.started_at.map(Into::into),
             duration_ms: s.duration_ms,
             dog_ms: s.dog_time_ms,
@@ -247,6 +252,9 @@ pub struct SourceFile {
     pub modified_ms: Option<i64>,
     /// Текущее смещение часового пояса устройства, минуты.
     pub utc_offset_min: i32,
+    /// Постоянная ссылка на файл (content:// на Android) — сохраняется, чтобы потом
+    /// можно было прослушать эпизоды. `None`, если доступ к файлу временный.
+    pub uri: Option<String>,
 }
 
 #[derive(uniffi::Object)]
@@ -260,7 +268,8 @@ impl BarkLog {
     /// `db_path` — файл базы (создаётся при первом запуске), `model_path` — yamnet.safetensors.
     #[uniffi::constructor]
     pub fn new(db_path: String, model_path: String) -> Result<Arc<Self>> {
-        let model = Yamnet::load(&model_path).map_err(|e| BarkLogError::Model { reason: e.to_string(),
+        let model = Yamnet::load(&model_path).map_err(|e| BarkLogError::Model {
+            reason: e.to_string(),
         })?;
         let store = Store::open(&db_path)?;
         Ok(Arc::new(Self {
@@ -288,7 +297,8 @@ impl BarkLog {
         #[cfg(not(unix))]
         {
             let _ = (fd, file, listener);
-            Err(BarkLogError::Audio { reason: "дескрипторы поддерживаются только на Android/iOS".into(),
+            Err(BarkLogError::Audio {
+                reason: "дескрипторы поддерживаются только на Android/iOS".into(),
             })
         }
     }
@@ -300,7 +310,8 @@ impl BarkLog {
         file: SourceFile,
         listener: Arc<dyn ProgressListener>,
     ) -> Result<i64> {
-        let f = File::open(&path).map_err(|e| BarkLogError::Audio { reason: e.to_string(),
+        let f = File::open(&path).map_err(|e| BarkLogError::Audio {
+            reason: e.to_string(),
         })?;
         self.analyze_file(f, file, listener)
     }
@@ -327,13 +338,13 @@ impl BarkLog {
     }
 
     pub fn get_report(&self, id: i64) -> Result<SessionReport> {
-        let report = self
+        let (report, uri) = self
             .store
             .lock()
             .unwrap()
-            .get(id)?
+            .get_with_source(id)?
             .ok_or(BarkLogError::NotFound)?;
-        Ok(SessionReport::from_core(id, report))
+        Ok(SessionReport::from_core(id, report, uri))
     }
 
     pub fn delete_session(&self, id: i64) -> Result<bool> {
@@ -380,7 +391,11 @@ impl BarkLog {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or_default();
-        Ok(self.store.lock().unwrap().insert(&report, now)?)
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .insert(&report, now, file.uri.as_deref())?)
     }
 }
 
@@ -432,6 +447,7 @@ mod tests {
             display_name: "REC_20261107_093000.wav".into(),
             modified_ms: None,
             utc_offset_min: 180,
+            uri: Some("content://test/rec".into()),
         };
         let id = bl
             .analyze_path(path.clone(), file.clone(), counter.clone())
@@ -448,6 +464,7 @@ mod tests {
 
         let report = bl.get_report(id).unwrap();
         assert_eq!(report.duration_ms, 5000);
+        assert_eq!(report.source_uri.as_deref(), Some("content://test/rec"));
         assert_eq!(report.classes.len(), 6);
         assert!(report.timeline.iter().all(|b| b.class_ms.len() == 6));
 

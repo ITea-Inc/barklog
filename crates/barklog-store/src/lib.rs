@@ -45,7 +45,9 @@ impl SessionSummary {
 }
 
 /// Миграции по порядку; номер версии схемы = число применённых миграций.
-const MIGRATIONS: &[&str] = &["CREATE TABLE sessions (
+const MIGRATIONS: &[&str] = &[
+    // 1: сессии.
+    "CREATE TABLE sessions (
         id              INTEGER PRIMARY KEY,
         created_at_ms   INTEGER NOT NULL,
         source_name     TEXT    NOT NULL,
@@ -61,7 +63,10 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE sessions (
         episodes        INTEGER NOT NULL,
         report_json     TEXT    NOT NULL
     );
-    CREATE INDEX sessions_by_start ON sessions (coalesce(started_at_ms, created_at_ms));"];
+    CREATE INDEX sessions_by_start ON sessions (coalesce(started_at_ms, created_at_ms));",
+    // 2: ссылка на исходный файл (content:// на Android) — для прослушивания эпизодов.
+    "ALTER TABLE sessions ADD COLUMN source_uri TEXT;",
+];
 
 pub struct Store {
     conn: Connection,
@@ -86,15 +91,21 @@ impl Store {
         Ok(Self { conn })
     }
 
-    pub fn insert(&self, report: &Report, created_at_ms: i64) -> Result<i64> {
+    /// `source_uri` — откуда можно заново открыть запись (для прослушивания), если это возможно.
+    pub fn insert(
+        &self,
+        report: &Report,
+        created_at_ms: i64,
+        source_uri: Option<&str>,
+    ) -> Result<i64> {
         let s = &report.stats;
         let class = |c: SoundClass| s.classes[c.index()].time_ms as i64;
         let st = report.started_at.as_ref();
         self.conn.execute(
             "INSERT INTO sessions (created_at_ms, source_name, started_at_ms, utc_offset_min,
                 start_source, duration_ms, dog_ms, bark_ms, whine_ms, howl_ms, growl_ms,
-                episodes, report_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                episodes, report_json, source_uri)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 created_at_ms,
                 report.source.clone().unwrap_or_default(),
@@ -109,6 +120,7 @@ impl Store {
                 class(SoundClass::Growl),
                 s.episodes,
                 serde_json::to_string(report)?,
+                source_uri,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -148,15 +160,21 @@ impl Store {
     }
 
     pub fn get(&self, id: i64) -> Result<Option<Report>> {
-        let json: Option<String> = self
+        Ok(self.get_with_source(id)?.map(|(r, _)| r))
+    }
+
+    /// Отчёт вместе со ссылкой на исходный файл.
+    pub fn get_with_source(&self, id: i64) -> Result<Option<(Report, Option<String>)>> {
+        let row: Option<(String, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT report_json FROM sessions WHERE id = ?1",
+                "SELECT report_json, source_uri FROM sessions WHERE id = ?1",
                 [id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+        row.map(|(json, uri)| Ok((serde_json::from_str(&json)?, uri)))
+            .transpose()
     }
 
     /// `true`, если сессия была и удалена.
@@ -225,8 +243,12 @@ mod tests {
             utc_offset_min: 180,
             source: StartSource::Manual,
         };
-        let a = store.insert(&report("a.m4a", Some(early), 10), 50).unwrap();
-        let b = store.insert(&report("b.m4a", Some(late), 20), 40).unwrap();
+        let a = store
+            .insert(&report("a.m4a", Some(early), 10), 50, Some("content://a"))
+            .unwrap();
+        let b = store
+            .insert(&report("b.m4a", Some(late), 20), 40, None)
+            .unwrap();
 
         let list = store.list().unwrap();
         assert_eq!(list.iter().map(|s| s.id).collect::<Vec<_>>(), [b, a]);
@@ -239,6 +261,11 @@ mod tests {
         let full = store.get(a).unwrap().unwrap();
         assert_eq!(full.stats.dog_time_ms, 10 * 480);
         assert_eq!(full.started_at.unwrap().source, StartSource::FileName);
+        assert_eq!(
+            store.get_with_source(a).unwrap().unwrap().1.as_deref(),
+            Some("content://a")
+        );
+        assert_eq!(store.get_with_source(b).unwrap().unwrap().1, None);
 
         assert!(store.delete(a).unwrap());
         assert!(!store.delete(a).unwrap());
@@ -247,12 +274,27 @@ mod tests {
     }
 
     #[test]
+    fn migrates_version_1_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        let store = Store::init(conn).unwrap();
+        let id = store
+            .insert(&report("old.m4a", None, 3), 1, Some("content://x"))
+            .unwrap();
+        assert_eq!(
+            store.get_with_source(id).unwrap().unwrap().1.as_deref(),
+            Some("content://x")
+        );
+    }
+
+    #[test]
     fn reopening_keeps_data() {
         let path = std::env::temp_dir().join(format!("barklog-store-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let store = Store::open(&path).unwrap();
-            store.insert(&report("x.wav", None, 5), 1).unwrap();
+            store.insert(&report("x.wav", None, 5), 1, None).unwrap();
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.list().unwrap().len(), 1);
