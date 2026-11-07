@@ -34,6 +34,23 @@ cargo build --release
 `barklog inspect запись.m4a` показывает топ классов AudioSet по каждому окну —
 удобно понять, за что модель принимает конкретный звук.
 
+## Android
+
+Нужны Android SDK (платформа 36.1), NDK 30, JDK 21 (подойдёт `jbr` из Android Studio)
+и cargo-ndk:
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk
+cd android
+./gradlew assembleDebug        # APK: app/build/outputs/apk/debug/
+./gradlew installDebug         # на подключённый телефон или эмулятор
+```
+
+Gradle сам собирает `libbarklog_ffi.so` через cargo-ndk (arm64-v8a и x86_64),
+генерирует Kotlin-биндинги UniFFI и кладёт модель в assets. Проект можно открыть
+в Android Studio — папка `android/`.
+
 ## Модель
 
 [YAMNet](https://github.com/tensorflow/models/tree/master/research/audioset/yamnet)

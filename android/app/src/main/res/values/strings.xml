@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BarkLog</string>
+    <string name="channel_analysis">Анализ записей</string>
+</resources>

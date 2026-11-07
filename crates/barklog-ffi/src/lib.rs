@@ -17,12 +17,12 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum BarkLogError {
-    #[error("{message}")]
-    Audio { message: String },
-    #[error("{message}")]
-    Model { message: String },
-    #[error("{message}")]
-    Storage { message: String },
+    #[error("{reason}")]
+    Audio { reason: String },
+    #[error("{reason}")]
+    Model { reason: String },
+    #[error("{reason}")]
+    Storage { reason: String },
     #[error("анализ отменён")]
     Cancelled,
     #[error("сессия не найдена")]
@@ -31,16 +31,14 @@ pub enum BarkLogError {
 
 impl From<barklog_store::StoreError> for BarkLogError {
     fn from(e: barklog_store::StoreError) -> Self {
-        BarkLogError::Storage {
-            message: e.to_string(),
+        BarkLogError::Storage { reason: e.to_string(),
         }
     }
 }
 
 impl From<barklog_audio::AudioError> for BarkLogError {
     fn from(e: barklog_audio::AudioError) -> Self {
-        BarkLogError::Audio {
-            message: e.to_string(),
+        BarkLogError::Audio { reason: e.to_string(),
         }
     }
 }
@@ -262,8 +260,7 @@ impl BarkLog {
     /// `db_path` — файл базы (создаётся при первом запуске), `model_path` — yamnet.safetensors.
     #[uniffi::constructor]
     pub fn new(db_path: String, model_path: String) -> Result<Arc<Self>> {
-        let model = Yamnet::load(&model_path).map_err(|e| BarkLogError::Model {
-            message: e.to_string(),
+        let model = Yamnet::load(&model_path).map_err(|e| BarkLogError::Model { reason: e.to_string(),
         })?;
         let store = Store::open(&db_path)?;
         Ok(Arc::new(Self {
@@ -291,8 +288,7 @@ impl BarkLog {
         #[cfg(not(unix))]
         {
             let _ = (fd, file, listener);
-            Err(BarkLogError::Audio {
-                message: "дескрипторы поддерживаются только на Android/iOS".into(),
+            Err(BarkLogError::Audio { reason: "дескрипторы поддерживаются только на Android/iOS".into(),
             })
         }
     }
@@ -304,8 +300,7 @@ impl BarkLog {
         file: SourceFile,
         listener: Arc<dyn ProgressListener>,
     ) -> Result<i64> {
-        let f = File::open(&path).map_err(|e| BarkLogError::Audio {
-            message: e.to_string(),
+        let f = File::open(&path).map_err(|e| BarkLogError::Audio { reason: e.to_string(),
         })?;
         self.analyze_file(f, file, listener)
     }

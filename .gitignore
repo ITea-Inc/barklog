@@ -34,3 +34,9 @@ desktop.ini
 *.m4a
 *.mp3
 *.wav
+
+# Android (дополнение)
+android/.kotlin/
+android/**/build/
+android/local.properties
+android/.idea/
