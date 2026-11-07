@@ -13,6 +13,8 @@ pub enum StartSource {
     Manual,
     FileName,
     FileModified,
+    /// Записано в приложении — время точное.
+    Recorded,
 }
 
 impl StartSource {
@@ -21,6 +23,7 @@ impl StartSource {
             StartSource::Manual => "указано вручную",
             StartSource::FileName => "из имени файла",
             StartSource::FileModified => "по времени изменения файла, может быть неточным",
+            StartSource::Recorded => "записано в приложении",
         }
     }
 }

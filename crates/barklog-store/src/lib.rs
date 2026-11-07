@@ -191,6 +191,7 @@ fn source_key(s: StartSource) -> &'static str {
         StartSource::Manual => "manual",
         StartSource::FileName => "file_name",
         StartSource::FileModified => "file_modified",
+        StartSource::Recorded => "recorded",
     }
 }
 
@@ -198,6 +199,7 @@ fn parse_source(s: Option<&str>) -> StartSource {
     match s {
         Some("manual") => StartSource::Manual,
         Some("file_name") => StartSource::FileName,
+        Some("recorded") => StartSource::Recorded,
         _ => StartSource::FileModified,
     }
 }

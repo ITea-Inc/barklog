@@ -164,6 +164,7 @@ dependencies = [
  "barklog-audio",
  "barklog-ml",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

@@ -75,6 +75,7 @@ pub enum StartSource {
     Manual,
     FileName,
     FileModified,
+    Recorded,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -93,6 +94,7 @@ impl From<core::StartTime> for StartInfo {
                 core::StartSource::Manual => StartSource::Manual,
                 core::StartSource::FileName => StartSource::FileName,
                 core::StartSource::FileModified => StartSource::FileModified,
+                core::StartSource::Recorded => StartSource::Recorded,
             },
         }
     }

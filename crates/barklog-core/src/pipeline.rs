@@ -1,5 +1,7 @@
 //! Потоковый анализ: сигнал 16 кГц → патчи → гейт по громкости → YAMNet → окна.
 
+use std::borrow::Borrow;
+
 use barklog_audio::{AudioError, AudioSource, TARGET_RATE};
 use barklog_ml::{FeatureExtractor, PATCH_HOP_MS, Patch, Yamnet};
 use serde::{Deserialize, Serialize};
@@ -7,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::SoundClass;
 use crate::classify::{ClassScores, Thresholds, decide};
 
-/// Сколько патчей копить перед запуском сети (≈ 30 с звука).
+/// Сколько патчей копить перед запуском сети (≈ 30 с звука). Большой пакет
+/// эффективнее; для живой записи берут меньше — см. [`StreamAnalyzer::with_batch`].
 const BATCH_PATCHES: usize = 64;
 /// Насколько быстро оценка фонового шума может расти, дБ на окно (≈ 6 дБ в минуту).
 const FLOOR_RISE_DB: f32 = 0.05;
@@ -57,8 +60,10 @@ pub enum AnalyzeError {
 }
 
 /// Инкрементальный анализатор: подходит и для файла, и для живой записи.
-pub struct StreamAnalyzer<'m> {
-    model: &'m Yamnet,
+/// Модель — `&Yamnet` или `Arc<Yamnet>` (когда анализатор живёт дольше вызова).
+pub struct StreamAnalyzer<M: Borrow<Yamnet>> {
+    model: M,
+    batch: usize,
     thresholds: Thresholds,
     use_gate: bool,
     features: FeatureExtractor,
@@ -68,10 +73,11 @@ pub struct StreamAnalyzer<'m> {
     gated: usize,
 }
 
-impl<'m> StreamAnalyzer<'m> {
-    pub fn new(model: &'m Yamnet, thresholds: Thresholds) -> Self {
+impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
+    pub fn new(model: M, thresholds: Thresholds) -> Self {
         Self {
             model,
+            batch: BATCH_PATCHES,
             thresholds,
             use_gate: true,
             features: FeatureExtractor::new(),
@@ -88,6 +94,12 @@ impl<'m> StreamAnalyzer<'m> {
         self
     }
 
+    /// Запускать сеть каждые `patches` окон (по 0,48 с) — меньше задержка, больше накладных.
+    pub fn with_batch(mut self, patches: usize) -> Self {
+        self.batch = patches.max(1);
+        self
+    }
+
     pub fn processed_ms(&self) -> u64 {
         self.features.samples_seen() * 1000 / TARGET_RATE as u64
     }
@@ -99,8 +111,22 @@ impl<'m> StreamAnalyzer<'m> {
 
     pub fn push(&mut self, samples: &[f32]) {
         self.features.push(samples, &mut self.pending);
-        if self.pending.len() >= BATCH_PATCHES {
+        if self.pending.len() >= self.batch {
             self.run_batch();
+        }
+    }
+
+    /// Текущее состояние без завершения потока: окна, готовые на этот момент.
+    /// Длительность — до конца последнего окна (звук, ещё не прошедший сеть, не учитывается).
+    pub fn snapshot(&self) -> Analysis {
+        let covered = self
+            .windows
+            .last()
+            .map(|w| (w.start_ms + PATCH_HOP_MS).min(self.processed_ms()))
+            .unwrap_or(0);
+        Analysis {
+            duration_ms: covered,
+            windows: self.windows.clone(),
         }
     }
 
@@ -135,7 +161,7 @@ impl<'m> StreamAnalyzer<'m> {
             .filter(|(_, g)| !**g)
             .map(|(p, _)| p.clone())
             .collect();
-        let mut predictions = self.model.predict(&to_run).into_iter();
+        let mut predictions = self.model.borrow().predict(&to_run).into_iter();
 
         for (p, g) in patches.iter().zip(gated) {
             let (class, confidence, scores) = if g {
