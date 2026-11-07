@@ -1,0 +1,36 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/jniLibs/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# iOS
+ios/build/
+ios/**/xcuserdata/
+ios/**/*.xcframework
+ios/Pods/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local test recordings (не коммитим личные записи)
+/samples/
+*.m4a
+*.mp3
+*.wav
