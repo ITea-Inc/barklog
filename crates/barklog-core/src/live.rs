@@ -89,8 +89,10 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
     /// Моно PCM 16 бит little-endian с частотой `input_rate`.
     pub fn push_pcm16(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let samples: Vec<f32> = bytes
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b) as f32 / 32_768.0)
             .collect();
         self.push(&samples)
     }

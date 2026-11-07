@@ -7,9 +7,9 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use barklog_audio::FileSource;
+use barklog_audio::{AudioSource, FileSource};
 use barklog_core as core;
-use barklog_core::{AnalyzeError, ReportSettings, Thresholds, analyze, build_report};
+use barklog_core::{AnalyzeError, LiveRecorder, ReportSettings, Thresholds, analyze, build_report};
 use barklog_ml::Yamnet;
 use barklog_store::Store;
 
@@ -261,8 +261,8 @@ pub struct SourceFile {
 
 #[derive(uniffi::Object)]
 pub struct BarkLog {
-    model: Yamnet,
-    store: Mutex<Store>,
+    model: Arc<Yamnet>,
+    store: Arc<Mutex<Store>>,
 }
 
 #[uniffi::export]
@@ -275,8 +275,8 @@ impl BarkLog {
         })?;
         let store = Store::open(&db_path)?;
         Ok(Arc::new(Self {
-            model,
-            store: Mutex::new(store),
+            model: Arc::new(model),
+            store: Arc::new(Mutex::new(store)),
         }))
     }
 
@@ -349,6 +349,52 @@ impl BarkLog {
         Ok(SessionReport::from_core(id, report, uri))
     }
 
+    /// Начинает живую запись. `input_rate` — частота микрофона (моно, PCM 16 бит),
+    /// `clips_root` — папка, в которой для сессии создаётся каталог с фрагментами звука.
+    pub fn start_live(
+        &self,
+        input_rate: u32,
+        utc_offset_min: i32,
+        clips_root: String,
+    ) -> Result<Arc<LiveSession>> {
+        let now = now_ms();
+        let started_at = core::StartTime {
+            unix_ms: now,
+            utc_offset_min,
+            source: core::StartSource::Recorded,
+        };
+        let dir = Path::new(&clips_root).join(format!("live-{now}"));
+        let recorder = LiveRecorder::new(
+            self.model.clone(),
+            Thresholds::default(),
+            input_rate,
+            started_at,
+            &dir,
+        )
+        .map_err(storage_error)?;
+        Ok(Arc::new(LiveSession {
+            recorder: Mutex::new(Some(recorder)),
+            store: self.store.clone(),
+        }))
+    }
+
+    /// Звук фрагмента сессии для прослушивания: PCM 16 бит LE, 16 кГц, моно.
+    /// Работает для сессий, записанных в приложении (у них сохранены фрагменты).
+    pub fn clip_pcm16(&self, session_id: i64, start_ms: u64, end_ms: u64) -> Result<Vec<u8>> {
+        let (_, uri) = self
+            .store
+            .lock()
+            .unwrap()
+            .get_with_source(session_id)?
+            .ok_or(BarkLogError::NotFound)?;
+        let dir = uri
+            .as_deref()
+            .and_then(|u| u.strip_prefix(CLIPS_URI_PREFIX))
+            .ok_or(BarkLogError::NotFound)?;
+        let samples = core::clips::read_clip(dir, start_ms, end_ms).map_err(storage_error)?;
+        Ok(samples.iter().flat_map(|v| v.to_le_bytes()).collect())
+    }
+
     pub fn delete_session(&self, id: i64) -> Result<bool> {
         Ok(self.store.lock().unwrap().delete(id)?)
     }
@@ -389,15 +435,169 @@ impl BarkLog {
             started_at,
             Some(file.display_name.clone()),
         );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or_default();
+        let now = now_ms();
         Ok(self
             .store
             .lock()
             .unwrap()
             .insert(&report, now, file.uri.as_deref())?)
+    }
+}
+
+/// Префикс `source_uri` сессий, записанных в приложении: дальше — путь к фрагментам.
+pub const CLIPS_URI_PREFIX: &str = "clips:";
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+fn storage_error(e: std::io::Error) -> BarkLogError {
+    BarkLogError::Storage {
+        reason: e.to_string(),
+    }
+}
+
+/// Снимок живой записи для экрана и для отправки на другой телефон.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct LiveSnapshot {
+    /// Сколько звука получено.
+    pub elapsed_ms: u64,
+    /// Сколько уже проанализировано (отстаёт на несколько секунд).
+    pub analyzed_ms: u64,
+    /// Собака слышна прямо сейчас (последние ~10 с).
+    pub dog_now: bool,
+    /// Когда собака последний раз подавала голос (от начала записи).
+    pub last_dog_sound_ms: Option<u64>,
+    /// Голос собаки за последние 15 минут.
+    pub recent_dog_ms: u64,
+    /// Громкость последнего окна, дБFS.
+    pub level_db: f32,
+    /// Отчёт по уже проанализированной части (id = -1).
+    pub report: SessionReport,
+}
+
+/// Идущая запись. Звук передаётся порциями из потока записи платформы.
+#[derive(uniffi::Object)]
+pub struct LiveSession {
+    recorder: Mutex<Option<LiveRecorder<Arc<Yamnet>>>>,
+    store: Arc<Mutex<Store>>,
+}
+
+#[uniffi::export]
+impl LiveSession {
+    /// Моно PCM 16 бит little-endian с частотой, указанной в `start_live`.
+    /// Анализ идёт прямо в этом вызове (раз в ~4 с звука вызов заметно дольше).
+    pub fn push_pcm16(&self, pcm: Vec<u8>) -> Result<()> {
+        let mut guard = self.recorder.lock().unwrap();
+        let rec = guard.as_mut().ok_or(BarkLogError::NotFound)?;
+        rec.push_pcm16(&pcm).map_err(storage_error)
+    }
+
+    pub fn snapshot(&self) -> Result<LiveSnapshot> {
+        let guard = self.recorder.lock().unwrap();
+        let rec = guard.as_ref().ok_or(BarkLogError::NotFound)?;
+        let s = rec.snapshot();
+        Ok(LiveSnapshot {
+            elapsed_ms: s.elapsed_ms,
+            analyzed_ms: s.analyzed_ms,
+            dog_now: s.dog_now,
+            last_dog_sound_ms: s.last_dog_sound_ms,
+            recent_dog_ms: s.recent_dog_ms,
+            level_db: s.level_db,
+            report: SessionReport::from_core(-1, s.report, None),
+        })
+    }
+
+    /// Останавливает запись, сохраняет сессию и возвращает её id.
+    pub fn finish(&self) -> Result<i64> {
+        let rec = self
+            .recorder
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or(BarkLogError::NotFound)?;
+        let started_at = rec.started_at();
+        let dir = rec.clips_dir().to_string_lossy().into_owned();
+        let (analysis, _) = rec.finish().map_err(storage_error)?;
+        let report = build_report(
+            &analysis,
+            &ReportSettings::for_duration(analysis.duration_ms),
+            Some(started_at),
+            Some("Запись в приложении".into()),
+        );
+        let uri = format!("{CLIPS_URI_PREFIX}{dir}");
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .insert(&report, now_ms(), Some(&uri))?)
+    }
+}
+
+/// Читает аудиофайл порциями PCM 16 бит 16 кГц — чтобы в отладочной сборке
+/// «проиграть» файл в живую запись вместо микрофона.
+#[derive(uniffi::Object)]
+pub struct PcmFileReader {
+    source: Mutex<FileSource>,
+}
+
+#[uniffi::export]
+impl PcmFileReader {
+    #[uniffi::constructor]
+    pub fn open_path(path: String) -> Result<Arc<Self>> {
+        let ext = Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_owned);
+        let f = File::open(&path).map_err(|e| BarkLogError::Audio {
+            reason: e.to_string(),
+        })?;
+        Ok(Arc::new(Self {
+            source: Mutex::new(FileSource::from_file(f, ext.as_deref())?),
+        }))
+    }
+
+    /// Дескриптор переходит во владение Rust (см. `analyze_fd`).
+    #[uniffi::constructor]
+    pub fn open_fd(fd: i32, display_name: String) -> Result<Arc<Self>> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::FromRawFd;
+            let ext = Path::new(&display_name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_owned);
+            // SAFETY: вызывающая сторона передаёт открытый дескриптор и отказывается от владения.
+            let f = unsafe { File::from_raw_fd(fd) };
+            Ok(Arc::new(Self {
+                source: Mutex::new(FileSource::from_file(f, ext.as_deref())?),
+            }))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (fd, display_name);
+            Err(BarkLogError::Audio {
+                reason: "дескрипторы поддерживаются только на Android/iOS".into(),
+            })
+        }
+    }
+
+    /// Следующая порция (не меньше `min_samples`, если файл не кончился); пусто — конец.
+    pub fn next_chunk(&self, min_samples: u32) -> Result<Vec<u8>> {
+        let mut src = self.source.lock().unwrap();
+        let mut buf = Vec::new();
+        while buf.len() < min_samples as usize {
+            if !src.read(&mut buf)? {
+                break;
+            }
+        }
+        Ok(buf
+            .iter()
+            .flat_map(|&x| ((x.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes())
+            .collect())
     }
 }
 
@@ -473,10 +673,45 @@ mod tests {
         // Отмена из слушателя.
         let cancel = Arc::new(Counter(AtomicU32::new(0), false));
         assert!(matches!(
-            bl.analyze_path(path, file, cancel),
+            bl.analyze_path(path.clone(), file, cancel),
             Err(BarkLogError::Cancelled)
         ));
         assert_eq!(bl.list_sessions().unwrap().len(), 1);
+
+        // Живая запись из того же файла: фрагменты пишутся, отчёт сохраняется.
+        let clips = std::env::temp_dir().join(format!("barklog-ffi-clips-{}", std::process::id()));
+        let live = bl
+            .start_live(16_000, 180, clips.to_string_lossy().into_owned())
+            .unwrap();
+        let reader = PcmFileReader::open_path(path.clone()).unwrap();
+        loop {
+            let chunk = reader.next_chunk(1600).unwrap();
+            if chunk.is_empty() {
+                break;
+            }
+            live.push_pcm16(chunk).unwrap();
+        }
+        let snap = live.snapshot().unwrap();
+        assert_eq!(snap.elapsed_ms, 5000);
+        assert_eq!(snap.report.id, -1);
+        let live_id = live.finish().unwrap();
+        assert!(matches!(live.snapshot(), Err(BarkLogError::NotFound)));
+        let live_report = bl.get_report(live_id).unwrap();
+        assert_eq!(
+            live_report.started_at.unwrap().source,
+            StartSource::Recorded
+        );
+        assert!(
+            live_report
+                .source_uri
+                .unwrap()
+                .starts_with(CLIPS_URI_PREFIX)
+        );
+        // Синус — не собака: фрагментов нет, звук эпизода — тишина нужной длины.
+        let pcm = bl.clip_pcm16(live_id, 0, 1000).unwrap();
+        assert_eq!(pcm.len(), 16_000 * 2);
+        assert!(pcm.iter().all(|&b| b == 0));
+        let _ = std::fs::remove_dir_all(&clips);
 
         assert!(bl.delete_session(id).unwrap());
         assert!(matches!(bl.get_report(id), Err(BarkLogError::NotFound)));

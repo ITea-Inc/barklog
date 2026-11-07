@@ -187,9 +187,9 @@ pub fn read_clip(dir: impl AsRef<Path>, start_ms: u64, end_ms: u64) -> std::io::
         file.read_exact(&mut bytes)?;
         for (o, b) in out[(from - s) as usize..(to - s) as usize]
             .iter_mut()
-            .zip(bytes.chunks_exact(2))
+            .zip(bytes.as_chunks::<2>().0)
         {
-            *o = i16::from_le_bytes([b[0], b[1]]);
+            *o = i16::from_le_bytes(*b);
         }
     }
     Ok(out)
