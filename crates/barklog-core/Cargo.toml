@@ -1,0 +1,13 @@
+[package]
+name = "barklog-core"
+description = "Пайплайн анализа, эпизоды и статистика BarkLog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+barklog-audio.workspace = true
+barklog-ml.workspace = true
+serde.workspace = true
+thiserror.workspace = true
