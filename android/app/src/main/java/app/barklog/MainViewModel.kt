@@ -1,6 +1,13 @@
 package app.barklog
 
+import android.app.Activity
 import android.app.Application
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import app.barklog.remote.RemoteLive
+import app.barklog.remote.RemoteSync
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flatMapLatest
 import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
@@ -55,6 +62,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    /** Удалённый просмотр: аккаунт и запись на телефонах аккаунта. */
+    val remoteAvailable: Boolean get() = barkApp.remote.available
+    val remoteEmulator: Boolean get() = barkApp.remote.emulator
+    val account: StateFlow<RemoteSync.Account?> = barkApp.remote.user
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val remoteLive: StateFlow<RemoteLive?> = barkApp.remote.user
+        .flatMapLatest { barkApp.remote.observe() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    fun signIn(activity: Activity) {
+        viewModelScope.launch {
+            try {
+                barkApp.remote.signIn(activity)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Отмена входа пользователем — не ошибка.
+                if (e !is GetCredentialCancellationException) {
+                    _error.value = "Не удалось войти: ${e.message ?: e.javaClass.simpleName}"
+                }
+            }
+        }
+    }
+
+    fun signOut() = barkApp.remote.signOut()
 
     /** Живая запись «Я ушёл». */
     val live: StateFlow<LiveState> = barkApp.live.state

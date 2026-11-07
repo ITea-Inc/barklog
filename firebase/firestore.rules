@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// Каждый видит и меняет только свои данные: users/{uid}/...
+//   live/state       — снимок идущей записи (пишет записывающий телефон)
+//   devices/{id}     — устройства аккаунта и их FCM-токены для уведомлений
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}

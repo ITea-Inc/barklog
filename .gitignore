@@ -40,3 +40,9 @@ android/.kotlin/
 android/**/build/
 android/local.properties
 android/.idea/
+
+# Firebase: конфиг своего проекта в git не кладём
+android/app/google-services.json
+firebase/functions/node_modules/
+firebase/.firebaserc
+firebase/*-debug.log

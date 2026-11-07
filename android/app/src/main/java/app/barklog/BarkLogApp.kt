@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import app.barklog.remote.RemoteSync
 import uniffi.barklog_ffi.BarkLog
 import java.io.File
 
@@ -14,6 +15,9 @@ class BarkLogApp : Application() {
 
     /** Состояние живой записи (сервис пишет, экраны читают). */
     val live = LiveController()
+
+    /** Удалённый просмотр с другого телефона (Firebase). */
+    val remote: RemoteSync by lazy { RemoteSync.create(this) }
 
     private val coreLock = Mutex()
     @Volatile private var core: BarkLog? = null
@@ -30,7 +34,14 @@ class BarkLogApp : Application() {
             getString(R.string.channel_recording),
             NotificationManager.IMPORTANCE_LOW,
         )
-        getSystemService(NotificationManager::class.java).createNotificationChannels(listOf(channel, recording))
+        val alerts = NotificationChannel(
+            CHANNEL_ALERTS,
+            getString(R.string.channel_alerts),
+            NotificationManager.IMPORTANCE_HIGH,
+        )
+        getSystemService(NotificationManager::class.java)
+            .createNotificationChannels(listOf(channel, recording, alerts))
+        remote // инициализируем Firebase заранее, чтобы вход восстановился до первого экрана
     }
 
     /**
@@ -64,6 +75,7 @@ class BarkLogApp : Application() {
     companion object {
         const val CHANNEL_ANALYSIS = "analysis"
         const val CHANNEL_RECORDING = "recording"
+        const val CHANNEL_ALERTS = "alerts"
         private const val MODEL_ASSET = "yamnet.safetensors"
     }
 }

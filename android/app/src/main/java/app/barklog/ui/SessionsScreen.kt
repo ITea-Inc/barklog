@@ -49,15 +49,23 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import uniffi.barklog_ffi.SessionSummary
+import app.barklog.remote.RemoteLive
 import kotlin.math.roundToInt
 
 @Composable
-fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit, onOpenLive: () -> Unit) {
+fun SessionsScreen(
+    vm: MainViewModel,
+    onOpen: (Long) -> Unit,
+    onOpenLive: () -> Unit,
+    onOpenRemote: () -> Unit,
+) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val analysis by vm.analysis.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     val dismissed by vm.dismissedAnalysis.collectAsStateWithLifecycle()
     val live by vm.live.collectAsStateWithLifecycle()
+    val account by vm.account.collectAsStateWithLifecycle()
+    val remote by vm.remoteLive.collectAsStateWithLifecycle()
     val c = Bark.colors
     val context = LocalContext.current
 
@@ -149,6 +157,14 @@ fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit, onOpenLive: () -> 
             }
         }
 
+        // Запись идёт на другом телефоне аккаунта (в отладке с эмулятором Firebase — и на этом).
+        remote?.takeIf { it.recording && (!it.isThisDevice || vm.remoteEmulator) }?.let { r ->
+            item {
+                RemoteCard(r, onClick = onOpenRemote)
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+
         analysis?.takeIf { it.visible() && !(it.state.isFinished && it.id == dismissed) }?.let { a ->
             item {
                 AnalysisCard(
@@ -187,6 +203,70 @@ fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit, onOpenLive: () -> 
                     }
                 }
             }
+        }
+
+        if (vm.remoteAvailable) {
+            item {
+                Spacer(Modifier.height(24.dp))
+                AccountPanel(
+                    email = account?.email,
+                    onSignIn = { context.findActivity()?.let(vm::signIn) },
+                    onSignOut = vm::signOut,
+                )
+            }
+        }
+    }
+}
+
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/** Карточка «дома идёт запись» на втором телефоне. */
+@Composable
+private fun RemoteCard(r: RemoteLive, onClick: () -> Unit) {
+    val c = Bark.colors
+    val snap = r.snapshot
+    Panel(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Dot(if (snap?.dogNow == true) c.bark else c.muted)
+            Spacer(Modifier.width(8.dp))
+            Text("Дома идёт запись", style = Bark.type.heading, modifier = Modifier.weight(1f))
+            Text(snap?.let { Fmt.counter(it.elapsedMs) } ?: "", style = Bark.type.mono.copy(color = c.text2))
+        }
+        Spacer(Modifier.height(4.dp))
+        val status = when {
+            snap == null -> "Ждём первые данные"
+            snap.dogNow -> "Собака подаёт голос"
+            else -> "Голос собаки ${Fmt.duration(snap.report.dogMs)} · ${Fmt.episodes(snap.report.episodesCount.toInt())}"
+        }
+        Text(status, style = Bark.type.caption)
+        Spacer(Modifier.height(12.dp))
+        Text("Открыть", style = Bark.type.body)
+    }
+}
+
+/** Вход для просмотра записи с другого телефона. */
+@Composable
+private fun AccountPanel(email: String?, onSignIn: () -> Unit, onSignOut: () -> Unit) {
+    val c = Bark.colors
+    Panel(Modifier.fillMaxWidth()) {
+        Text("Просмотр с другого телефона", style = Bark.type.heading)
+        Spacer(Modifier.height(4.dp))
+        if (email == null) {
+            Text(
+                "Войдите в один аккаунт Google на обоих телефонах — на втором будет видно, " +
+                    "что происходит дома, пока идёт запись. Передаются только цифры, без звука",
+                style = Bark.type.caption,
+            )
+            Spacer(Modifier.height(16.dp))
+            SecondaryAction("Войти через Google", onClick = onSignIn)
+        } else {
+            Text(email, style = Bark.type.caption)
+            Spacer(Modifier.height(12.dp))
+            TextLink("Выйти", c.text2, onSignOut)
         }
     }
 }

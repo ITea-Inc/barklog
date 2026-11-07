@@ -5,6 +5,12 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Firebase (удалённый просмотр): конфиг своего проекта кладётся в app/google-services.json.
+// Без него приложение собирается и работает, просто без удалённого просмотра.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 // Корень репозитория с Rust-workspace.
 val repoRoot: File = rootDir.parentFile
 
@@ -22,6 +28,12 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        // Для отладки с Firebase Emulator Suite: ./gradlew -Pbarklog.firebaseEmulator=10.0.2.2 ...
+        buildConfigField(
+            "String",
+            "FIREBASE_EMULATOR_HOST",
+            "\"${providers.gradleProperty("barklog.firebaseEmulator").getOrElse("")}\"",
+        )
         ndk {
             // arm64 — телефоны, x86_64 — эмулятор.
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -37,6 +49,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -146,4 +159,12 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
     implementation("${libs.jna.get()}@aar")
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth)
+    implementation(libs.firebase.firestore)
+    implementation(libs.firebase.messaging)
+    implementation(libs.credentials)
+    implementation(libs.credentials.play)
+    implementation(libs.googleid)
+    implementation(libs.coroutines.play)
 }

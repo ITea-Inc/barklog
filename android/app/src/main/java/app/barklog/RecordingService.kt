@@ -43,6 +43,7 @@ class RecordingService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val stopRequested = AtomicBoolean(false)
+    @Volatile private var startedAtMs = System.currentTimeMillis()
     private var wakeLock: PowerManager.WakeLock? = null
     private val app get() = application as BarkLogApp
 
@@ -58,6 +59,7 @@ class RecordingService : Service() {
 
     private fun start(simulate: Uri?) {
         stopRequested.set(false)
+        startedAtMs = System.currentTimeMillis()
         app.live.set(LiveState.Starting)
         // Запись из файла (отладка) микрофон не трогает — и разрешение на него не нужно.
         val type = when {
@@ -93,6 +95,10 @@ class RecordingService : Service() {
                 launch { publishSnapshots(session) }
                 if (simulate != null) feedFile(session, simulate) else feedMicrophone(session)
                 app.live.set(LiveState.Saving)
+                // Последний снимок и отметка «запись закончена» для второго телефона.
+                val finalJson = runCatching { session.snapshotJson() }.getOrNull()
+                val finalSnap = runCatching { session.snapshot() }.getOrNull()
+                app.remote.publish(recording = false, startedAtMs, finalJson, finalSnap)
                 val id = session.finish()
                 app.live.set(LiveState.Finished(id))
             } catch (e: BarkLogException) {
@@ -156,10 +162,21 @@ class RecordingService : Service() {
 
     private suspend fun publishSnapshots(session: LiveSession) {
         var lastNotification = 0L
+        var lastRemote = 0L
+        var lastDogNow: Boolean? = null
         while (scope.isActive && !stopRequested.get()) {
             runCatching { session.snapshot() }.getOrNull()?.let { snap ->
                 app.live.publish(snap)
+                // На другой телефон — раз в 30 с и сразу, когда собака начала или перестала лаять.
                 val now = SystemClock.elapsedRealtime()
+                if (now - lastRemote >= REMOTE_PERIOD_MS || snap.dogNow != lastDogNow) {
+                    lastRemote = now
+                    lastDogNow = snap.dogNow
+                    startedAtMs = snap.report.startedAt?.unixMs ?: startedAtMs
+                    runCatching { session.snapshotJson() }.getOrNull()?.let { json ->
+                        app.remote.publish(recording = true, startedAtMs, json, snap)
+                    }
+                }
                 if (now - lastNotification >= NOTIFICATION_PERIOD_MS) {
                     lastNotification = now
                     val text = "Прошло ${Fmt.duration(snap.elapsedMs)} · голос собаки ${Fmt.duration(snap.report.dogMs)}"
@@ -218,6 +235,7 @@ class RecordingService : Service() {
         private const val SIMULATION_SPEED = 20
         private const val SNAPSHOT_PERIOD_MS = 2_000L
         private const val NOTIFICATION_PERIOD_MS = 15_000L
+        private const val REMOTE_PERIOD_MS = 30_000L
         /** Wake lock с запасом: даже если что-то пойдёт не так, он отпустится сам. */
         private const val MAX_RECORDING_MS = 24 * 60 * 60 * 1000L
 

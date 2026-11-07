@@ -32,7 +32,18 @@ import uniffi.barklog_ffi.LiveSnapshot
 
 /** Экран идущей записи. Он же — в этапе 3б — экран просмотра с другого телефона. */
 @Composable
-fun LiveScreen(state: LiveState, onBack: () -> Unit, onStop: () -> Unit) {
+fun LiveScreen(
+    state: LiveState,
+    onBack: () -> Unit,
+    onStop: () -> Unit,
+    /** Просмотр с другого телефона: без кнопки «Я вернулся». */
+    readOnly: Boolean = false,
+    /** Подзаголовок, например «Pixel 8 · обновлено 12 с назад». */
+    note: String? = null,
+    /** Время для счётчика, если оно отличается от снимка (досчитываем между снимками). */
+    elapsedMs: Long? = null,
+    title: String? = null,
+) {
     val c = Bark.colors
     val snap = (state as? LiveState.Recording)?.snapshot
 
@@ -56,7 +67,7 @@ fun LiveScreen(state: LiveState, onBack: () -> Unit, onStop: () -> Unit) {
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item { Header(state, snap) }
+            item { Header(state, snap, note, elapsedMs, title) }
             if (snap != null) {
                 item { Stats(snap) }
                 item {
@@ -79,7 +90,7 @@ fun LiveScreen(state: LiveState, onBack: () -> Unit, onStop: () -> Unit) {
                     }
                 }
             }
-            item {
+            if (!readOnly) item {
                 Text(
                     "Оставьте телефон на зарядке рядом с местом, где обычно лежит собака. " +
                         "Экран можно выключить — запись продолжится. Звук целиком не сохраняется, " +
@@ -90,6 +101,7 @@ fun LiveScreen(state: LiveState, onBack: () -> Unit, onStop: () -> Unit) {
             }
         }
 
+        if (readOnly) return@Column
         val saving = state is LiveState.Saving
         Box(
             Modifier
@@ -110,21 +122,25 @@ fun LiveScreen(state: LiveState, onBack: () -> Unit, onStop: () -> Unit) {
 }
 
 @Composable
-private fun Header(state: LiveState, snap: LiveSnapshot?) {
+private fun Header(state: LiveState, snap: LiveSnapshot?, note: String?, elapsedMs: Long?, title: String?) {
     val c = Bark.colors
     Column(Modifier.padding(top = 8.dp, bottom = 12.dp)) {
         Text(
-            when (state) {
+            title ?: when (state) {
                 LiveState.Starting -> "Включаю микрофон"
                 LiveState.Saving -> "Сохраняю"
                 else -> "Идёт запись"
             },
             style = Bark.type.title,
         )
+        if (note != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(note, style = Bark.type.caption)
+        }
         Spacer(Modifier.height(12.dp))
         // Подпись продукта: время как на счётчике ленты.
         Text(
-            Fmt.counter(snap?.elapsedMs?.toLong() ?: 0),
+            Fmt.counter(elapsedMs ?: snap?.elapsedMs?.toLong() ?: 0),
             style = Bark.type.monoLarge.copy(fontSize = 44.sp, lineHeight = 48.sp, color = c.text),
         )
         Spacer(Modifier.height(16.dp))

@@ -51,6 +51,26 @@ Gradle сам собирает `libbarklog_ffi.so` через cargo-ndk (arm64-v
 генерирует Kotlin-биндинги UniFFI и кладёт модель в assets. Проект можно открыть
 в Android Studio — папка `android/`.
 
+## Удалённый просмотр (Firebase)
+
+Чтобы со второго телефона видеть идущую запись, нужен свой проект Firebase:
+
+1. Создать проект, добавить Android-приложение `app.barklog` с SHA-1 ключа подписи.
+2. Authentication → Sign-in method → Google; Firestore Database → создать (production).
+3. Скачать `google-services.json` в `android/app/` (в git не попадает).
+4. Firestore → Rules → вставить содержимое `firebase/firestore.rules`
+   (или `firebase deploy --only firestore:rules` из папки `firebase/`).
+5. Пуши «собака лает 10 минут» — `firebase deploy --only functions` (нужен тариф Blaze).
+
+Без `google-services.json` приложение работает, просто без удалённого просмотра.
+
+Проверка без настоящего проекта — локальный Firebase Emulator Suite:
+
+```sh
+cd firebase && firebase emulators:start --only auth,firestore --project demo-barklog
+cd android && ./gradlew installDebug -Pbarklog.firebaseEmulator=10.0.2.2
+```
+
 ## Модель
 
 [YAMNet](https://github.com/tensorflow/models/tree/master/research/audioset/yamnet)

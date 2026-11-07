@@ -3,4 +3,5 @@
     <string name="app_name">BarkLog</string>
     <string name="channel_analysis">Анализ записей</string>
     <string name="channel_recording">Запись</string>
+    <string name="channel_alerts">Собака лает долго</string>
 </resources>
