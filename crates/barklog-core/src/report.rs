@@ -27,7 +27,7 @@ impl Default for ReportSettings {
 }
 
 /// Когда началась запись (для почасовой разбивки по часам на стене).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartTime {
     pub unix_ms: i64,
     /// Смещение локального времени от UTC в минутах.
