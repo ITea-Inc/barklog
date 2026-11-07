@@ -56,6 +56,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /** Живая запись «Я ушёл». */
+    val live: StateFlow<LiveState> = barkApp.live.state
+
+    fun stopRecording() = RecordingService.stop(barkApp)
+
+    fun acknowledgeLive() = barkApp.live.acknowledge()
+
+    fun showError(message: String) {
+        _error.value = message
+    }
+
+    /** Звук фрагмента сессии, записанной в приложении: PCM 16 бит, 16 кГц. */
+    suspend fun clipPcm(sessionId: Long, startMs: Long, endMs: Long): ByteArray {
+        val core = barkApp.core()
+        return withContext(Dispatchers.IO) {
+            core.clipPcm16(sessionId, startMs.toULong(), endMs.toULong())
+        }
+    }
+
     val analysis: StateFlow<AnalysisState?> = work.getWorkInfosForUniqueWorkFlow(AnalysisWorker.UNIQUE_NAME)
         .map { infos ->
             // Сначала — то, что идёт сейчас, иначе самый свежий из завершённых.

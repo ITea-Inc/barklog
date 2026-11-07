@@ -12,6 +12,9 @@ import java.io.File
 
 class BarkLogApp : Application() {
 
+    /** Состояние живой записи (сервис пишет, экраны читают). */
+    val live = LiveController()
+
     private val coreLock = Mutex()
     @Volatile private var core: BarkLog? = null
 
@@ -22,7 +25,12 @@ class BarkLogApp : Application() {
             getString(R.string.channel_analysis),
             NotificationManager.IMPORTANCE_LOW,
         )
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        val recording = NotificationChannel(
+            CHANNEL_RECORDING,
+            getString(R.string.channel_recording),
+            NotificationManager.IMPORTANCE_LOW,
+        )
+        getSystemService(NotificationManager::class.java).createNotificationChannels(listOf(channel, recording))
     }
 
     /**
@@ -55,6 +63,7 @@ class BarkLogApp : Application() {
 
     companion object {
         const val CHANNEL_ANALYSIS = "analysis"
+        const val CHANNEL_RECORDING = "recording"
         private const val MODEL_ASSET = "yamnet.safetensors"
     }
 }

@@ -9,12 +9,15 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.barklog.ui.BarkLogTheme
+import app.barklog.ui.LiveScreen
 import app.barklog.ui.ReportScreen
 import app.barklog.ui.SessionsScreen
 
@@ -30,9 +33,30 @@ class MainActivity : ComponentActivity() {
         setContent {
             BarkLogTheme {
                 var openId by rememberSaveable { mutableStateOf<Long?>(null) }
+                var showLive by rememberSaveable { mutableStateOf(false) }
+                val live by vm.live.collectAsStateWithLifecycle()
+
+                // Запись сохранена — сразу открываем её отчёт.
+                LaunchedEffect(live) {
+                    val s = live
+                    if (s is LiveState.Finished) {
+                        showLive = false
+                        openId = s.sessionId
+                        vm.acknowledgeLive()
+                        vm.refresh()
+                    } else if (s is LiveState.Failed) {
+                        showLive = false
+                        vm.showError(s.message)
+                        vm.acknowledgeLive()
+                    }
+                }
+
                 val id = openId
-                if (id == null) {
-                    SessionsScreen(vm, onOpen = { openId = it })
+                if (showLive) {
+                    BackHandler { showLive = false }
+                    LiveScreen(live, onBack = { showLive = false }, onStop = vm::stopRecording)
+                } else if (id == null) {
+                    SessionsScreen(vm, onOpen = { openId = it }, onOpenLive = { showLive = true })
                 } else {
                     BackHandler { openId = null }
                     ReportScreen(

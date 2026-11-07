@@ -2,6 +2,8 @@ package app.barklog.ui
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.net.Uri
 import androidx.compose.runtime.Composable
@@ -20,9 +22,18 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** Откуда брать звук эпизода. */
+sealed interface ClipSource {
+    /** Исходный файл (выбран через системный диалог). */
+    data class File(val uri: Uri) : ClipSource
+
+    /** Фрагменты, сохранённые при записи в приложении: PCM 16 бит, 16 кГц. */
+    class Pcm(val load: suspend (startMs: Long, endMs: Long) -> ByteArray) : ClipSource
+}
+
 /**
- * Проигрывает фрагменты исходной записи: от начала эпизода (с запасом 0,5 с) до его конца.
- * Плеер готовится один раз на файл и переиспользуется между эпизодами.
+ * Проигрывает эпизоды: от начала (с запасом 0,5 с) до конца.
+ * Для файла плеер готовится один раз и переиспользуется между эпизодами.
  */
 class EpisodePlayer(private val context: Context, private val scope: CoroutineScope) {
 
@@ -41,7 +52,7 @@ class EpisodePlayer(private val context: Context, private val scope: CoroutineSc
     private var preparedUri: Uri? = null
     private var job: Job? = null
 
-    fun toggle(index: Int, uri: Uri, startMs: Long, endMs: Long) {
+    fun toggle(index: Int, source: ClipSource, startMs: Long, endMs: Long) {
         if (playing == index) {
             stop()
             return
@@ -49,6 +60,56 @@ class EpisodePlayer(private val context: Context, private val scope: CoroutineSc
         stop()
         val from = (startMs - PAD_MS).coerceAtLeast(0)
         val to = endMs + PAD_MS
+        when (source) {
+            is ClipSource.File -> playFile(index, source.uri, from, to)
+            is ClipSource.Pcm -> playPcm(index, source, from, to)
+        }
+    }
+
+    private fun playPcm(index: Int, source: ClipSource.Pcm, from: Long, to: Long) {
+        job = scope.launch {
+            var track: AudioTrack? = null
+            try {
+                val pcm = source.load(from, to)
+                val frames = pcm.size / 2
+                if (frames == 0) return@launch
+                track = AudioTrack.Builder()
+                    .setAudioAttributes(attributes())
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setSampleRate(PCM_RATE)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build(),
+                    )
+                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .setBufferSizeInBytes(pcm.size)
+                    .build()
+                track.write(pcm, 0, pcm.size)
+                track.play()
+                playing = index
+                error = null
+                while (isActive && track.playbackHeadPosition < frames) {
+                    progress = track.playbackHeadPosition.toFloat() / frames
+                    delay(50)
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                error = "Фрагмент не найден — возможно, данные записи удалены"
+            } finally {
+                track?.run {
+                    runCatching { stop() }
+                    release()
+                }
+                if (playing == index) {
+                    playing = null
+                    progress = 0f
+                }
+            }
+        }
+    }
+
+    private fun playFile(index: Int, uri: Uri, from: Long, to: Long) {
         job = scope.launch {
             try {
                 val mp = prepared(uri)
@@ -61,6 +122,7 @@ class EpisodePlayer(private val context: Context, private val scope: CoroutineSc
                     delay(50)
                 }
             } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 error = "Исходный файл недоступен — возможно, его удалили или переместили"
                 releasePlayer()
             } finally {
@@ -92,12 +154,7 @@ class EpisodePlayer(private val context: Context, private val scope: CoroutineSc
         releasePlayer()
         val mp = withContext(Dispatchers.IO) {
             MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN)
-                        .build(),
-                )
+                setAudioAttributes(attributes())
                 setDataSource(context, uri)
                 prepare()
             }
@@ -107,6 +164,11 @@ class EpisodePlayer(private val context: Context, private val scope: CoroutineSc
         return mp
     }
 
+    private fun attributes() = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN)
+        .build()
+
     private fun releasePlayer() {
         player?.release()
         player = null
@@ -115,6 +177,7 @@ class EpisodePlayer(private val context: Context, private val scope: CoroutineSc
 
     private companion object {
         const val PAD_MS = 500L
+        const val PCM_RATE = 16_000
     }
 }
 

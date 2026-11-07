@@ -65,7 +65,7 @@ fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () 
                 Text("Удалить", style = Bark.type.body.copy(color = c.text2))
             }
         }
-        report?.let { Report(it) }
+        report?.let { Report(it, vm) }
     }
 
     if (confirmDelete) {
@@ -87,7 +87,7 @@ fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () 
 }
 
 @Composable
-private fun Report(r: SessionReport) {
+private fun Report(r: SessionReport, vm: MainViewModel) {
     val c = Bark.colors
     val start = r.startedAt
     var selectedBin by remember(r.id) { mutableStateOf<String?>(null) }
@@ -159,7 +159,7 @@ private fun Report(r: SessionReport) {
 
         item { Shares(r) }
         item { Hours(r) }
-        item { EpisodesPanel(r) }
+        item { EpisodesPanel(r, vm) }
 
         item {
             val note = start?.let {
@@ -167,6 +167,7 @@ private fun Report(r: SessionReport) {
                     StartSource.MANUAL -> "указано вручную"
                     StartSource.FILE_NAME -> "из имени файла"
                     StartSource.FILE_MODIFIED -> "по времени изменения файла, может быть неточным"
+                    StartSource.RECORDED -> "записано в приложении"
                 }
             }
             Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -247,10 +248,18 @@ private fun Hours(r: SessionReport) {
 }
 
 @Composable
-private fun EpisodesPanel(r: SessionReport) {
+private fun EpisodesPanel(r: SessionReport, vm: MainViewModel) {
     val c = Bark.colors
     val player = rememberEpisodePlayer()
-    val uri = remember(r.sourceUri) { r.sourceUri?.let(Uri::parse) }
+    // Записи из приложения слушаются из сохранённых фрагментов, файлы — из исходника.
+    val source = remember(r.sourceUri, r.id) {
+        val u = r.sourceUri
+        when {
+            u == null -> null
+            u.startsWith("clips:") -> ClipSource.Pcm { from, to -> vm.clipPcm(r.id, from, to) }
+            else -> ClipSource.File(Uri.parse(u))
+        }
+    }
     Panel(Modifier.fillMaxWidth()) {
         PanelHeader(
             "Эпизоды",
@@ -262,7 +271,7 @@ private fun EpisodesPanel(r: SessionReport) {
         }
         val note = when {
             player.error != null -> player.error
-            uri == null -> "Для этой записи прослушивание недоступно: у приложения нет постоянного " +
+            source == null -> "Для этой записи прослушивание недоступно: у приложения нет постоянного " +
                 "доступа к файлу. Чтобы слушать фрагменты, добавьте файл кнопкой «Добавить запись»"
             else -> null
         }
@@ -277,7 +286,7 @@ private fun EpisodesPanel(r: SessionReport) {
                 r = r,
                 playing = player.playing == i,
                 progress = if (player.playing == i) player.progress else 0f,
-                onClick = uri?.let { u -> { player.toggle(i, u, e.startMs.toLong(), e.endMs.toLong()) } },
+                onClick = source?.let { src -> { player.toggle(i, src, e.startMs.toLong(), e.endMs.toLong()) } },
             )
         }
         if (r.episodes.size > MAX_EPISODES) {

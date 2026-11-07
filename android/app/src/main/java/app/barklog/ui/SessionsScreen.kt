@@ -20,8 +20,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
@@ -42,16 +40,26 @@ import androidx.work.WorkInfo
 import app.barklog.AnalysisState
 import app.barklog.MainActivity
 import app.barklog.MainViewModel
+import app.barklog.LiveState
+import app.barklog.RecordingService
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import uniffi.barklog_ffi.SessionSummary
 import kotlin.math.roundToInt
 
 @Composable
-fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit) {
+fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit, onOpenLive: () -> Unit) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val analysis by vm.analysis.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     val dismissed by vm.dismissedAnalysis.collectAsStateWithLifecycle()
+    val live by vm.live.collectAsStateWithLifecycle()
     val c = Bark.colors
+    val context = LocalContext.current
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) vm.analyzePicked(uri)
@@ -68,6 +76,33 @@ fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit) {
         } else {
             picker.launch(AUDIO_TYPES)
         }
+    }
+
+    // Запись: сначала микрофон (и уведомления), потом сервис и экран записи.
+    val startRecording = {
+        RecordingService.start(context)
+        onOpenLive()
+    }
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        if (granted[Manifest.permission.RECORD_AUDIO] == true) startRecording()
+        else vm.showError("Без доступа к микрофону запись невозможна — его можно разрешить в настройках приложения")
+    }
+    val record = {
+        val perms = buildList {
+            add(Manifest.permission.RECORD_AUDIO)
+            if (MainActivity.NEEDS_NOTIFICATION_PERMISSION) add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        micPermission.launch(perms.toTypedArray())
+    }
+    // Отладка: «запись» из файла вместо микрофона (долгое нажатие на кнопку в debug-сборке).
+    val simulatePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            RecordingService.start(context, simulate = uri)
+            onOpenLive()
+        }
+    }
+    val debuggable = remember {
+        context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
     }
 
     // Когда анализ закончился — обновляем список.
@@ -87,19 +122,19 @@ fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit) {
             Text("Записи", style = Bark.type.title)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Оставьте диктофон рядом с собакой, а потом добавьте файл — " +
+                "Уходя, включите запись и оставьте телефон рядом с собакой — " +
                     "приложение покажет, когда и сколько она лаяла и скулила",
                 style = Bark.type.subtitle,
             )
             Spacer(Modifier.height(20.dp))
-            Button(
-                onClick = add,
-                modifier = Modifier.height(44.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = c.primary, contentColor = c.onPrimary),
-                contentPadding = PaddingValues(horizontal = 20.dp),
-            ) {
-                Text("Добавить запись", style = Bark.type.body.copy(color = c.onPrimary))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                val recording = live.isBusy()
+                PrimaryAction(
+                    text = if (recording) "Идёт запись" else "Начать запись",
+                    onClick = if (recording) onOpenLive else record,
+                    onLongClick = if (debuggable && !recording) ({ simulatePicker.launch(AUDIO_TYPES) }) else null,
+                )
+                SecondaryAction("Добавить файл", onClick = add)
             }
             Spacer(Modifier.height(24.dp))
         }
@@ -157,6 +192,44 @@ fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit) {
 }
 
 private val AUDIO_TYPES = arrayOf("audio/*", "application/ogg", "video/mp4")
+
+private fun LiveState.isBusy() = this is LiveState.Starting || this is LiveState.Recording || this is LiveState.Saving
+
+/** Главная кнопка: заливка цветом текста, 44 dp. Долгое нажатие — только для отладки. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PrimaryAction(text: String, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
+    val c = Bark.colors
+    Box(
+        Modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(c.primary)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, style = Bark.type.body.copy(color = c.onPrimary))
+    }
+}
+
+/** Второстепенная кнопка: приподнятая поверхность с волосяной рамкой. */
+@Composable
+private fun SecondaryAction(text: String, onClick: () -> Unit) {
+    val c = Bark.colors
+    Box(
+        Modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(c.card)
+            .border(1.dp, c.line, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, style = Bark.type.body)
+    }
+}
 
 /** Карточку завершённого анализа показываем, только если он закончился ошибкой или сессией. */
 private fun AnalysisState.visible() = !state.isFinished ||
