@@ -28,7 +28,9 @@ pub fn encode_windows(windows: &[WindowResult]) -> Vec<u8> {
 /// Окна идут подряд с шагом 0,48 с, поэтому время начала не храним.
 pub fn decode_windows(bytes: &[u8]) -> Vec<WindowResult> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .map(|(i, b)| WindowResult {
             start_ms: i as u64 * PATCH_HOP_MS,

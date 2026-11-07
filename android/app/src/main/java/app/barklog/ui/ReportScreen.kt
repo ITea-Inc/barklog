@@ -24,7 +24,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,6 +35,15 @@ import app.barklog.MainViewModel
 import android.net.Uri
 import androidx.compose.ui.graphics.Color
 import uniffi.barklog_ffi.EpisodeInfo
+import uniffi.barklog_ffi.LabelInfo
+import uniffi.barklog_ffi.LabelKind
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import uniffi.barklog_ffi.SessionReport
 import uniffi.barklog_ffi.StartSource
 
@@ -43,7 +51,8 @@ private const val MAX_EPISODES = 300
 
 @Composable
 fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () -> Unit) {
-    val report by produceState<SessionReport?>(null, id) { value = vm.loadReport(id) }
+    var report by remember(id) { mutableStateOf<SessionReport?>(null) }
+    LaunchedEffect(id) { report = vm.loadReport(id) }
     var confirmDelete by remember { mutableStateOf(false) }
     val c = Bark.colors
 
@@ -65,7 +74,7 @@ fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () 
                 Text("Удалить", style = Bark.type.body.copy(color = c.text2))
             }
         }
-        report?.let { Report(it, vm) }
+        report?.let { Report(it, vm, onChanged = { updated -> report = updated }) }
     }
 
     if (confirmDelete) {
@@ -87,7 +96,7 @@ fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () 
 }
 
 @Composable
-private fun Report(r: SessionReport, vm: MainViewModel) {
+private fun Report(r: SessionReport, vm: MainViewModel, onChanged: (SessionReport) -> Unit) {
     val c = Bark.colors
     val start = r.startedAt
     var selectedBin by remember(r.id) { mutableStateOf<String?>(null) }
@@ -159,7 +168,7 @@ private fun Report(r: SessionReport, vm: MainViewModel) {
 
         item { Shares(r) }
         item { Hours(r) }
-        item { EpisodesPanel(r, vm) }
+        item { EpisodesPanel(r, vm, onChanged) }
 
         item {
             val note = start?.let {
@@ -248,9 +257,14 @@ private fun Hours(r: SessionReport) {
 }
 
 @Composable
-private fun EpisodesPanel(r: SessionReport, vm: MainViewModel) {
+private fun EpisodesPanel(r: SessionReport, vm: MainViewModel, onChanged: (SessionReport) -> Unit) {
     val c = Bark.colors
     val player = rememberEpisodePlayer()
+    val scope = rememberCoroutineScope()
+    val label: (Long, Long, LabelKind?) -> Unit = { start, end, kind ->
+        player.stop()
+        scope.launch { vm.labelEpisode(r.id, start, end, kind)?.let(onChanged) }
+    }
     // Записи из приложения слушаются из сохранённых фрагментов, файлы — из исходника.
     val source = remember(r.sourceUri, r.id) {
         val u = r.sourceUri
@@ -263,10 +277,12 @@ private fun EpisodesPanel(r: SessionReport, vm: MainViewModel) {
     Panel(Modifier.fillMaxWidth()) {
         PanelHeader(
             "Эпизоды",
-            "${Fmt.episodes(r.episodes.size)} · паузы до ${r.mergeGapMs.toLong() / 1000} с не разрывают эпизод",
+            "${Fmt.episodes(r.episodes.size)} · паузы до ${r.mergeGapMs.toLong() / 1000} с не разрывают эпизод" +
+                if (r.editable) ". Удерживайте эпизод, чтобы поправить, что это было" else "",
         )
         if (r.episodes.isEmpty()) {
             Text("За запись собака не подавала голос", style = Bark.type.caption)
+            NotDogList(r, onRestore = { l -> label(l.startMs.toLong(), l.endMs.toLong(), null) })
             return@Panel
         }
         val note = when {
@@ -287,15 +303,53 @@ private fun EpisodesPanel(r: SessionReport, vm: MainViewModel) {
                 playing = player.playing == i,
                 progress = if (player.playing == i) player.progress else 0f,
                 onClick = source?.let { src -> { player.toggle(i, src, e.startMs.toLong(), e.endMs.toLong()) } },
+                onLabel = if (r.editable) ({ kind -> label(e.startMs.toLong(), e.endMs.toLong(), kind) }) else null,
             )
         }
         if (r.episodes.size > MAX_EPISODES) {
             Spacer(Modifier.height(8.dp))
             Text("Показаны первые $MAX_EPISODES", style = Bark.type.caption)
         }
+        NotDogList(r, onRestore = { l -> label(l.startMs.toLong(), l.endMs.toLong(), null) })
     }
 }
 
+/** Отрезки, отмеченные «не собака»: из эпизодов они пропали, но их можно вернуть. */
+@Composable
+private fun NotDogList(r: SessionReport, onRestore: (LabelInfo) -> Unit) {
+    val c = Bark.colors
+    val notDog = r.labels.filter { it.label == LabelKind.NOT_DOG }
+    if (notDog.isEmpty()) return
+    Spacer(Modifier.height(16.dp))
+    Text("Отмечено «не собака»", style = Bark.type.caption.copy(color = c.text2))
+    Spacer(Modifier.height(4.dp))
+    notDog.forEach { l ->
+        Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                Fmt.clock(r.startedAt, l.startMs.toLong()),
+                style = Bark.type.mono.copy(color = c.muted),
+                modifier = Modifier.widthIn(min = 72.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(Fmt.duration((l.endMs - l.startMs).toLong()), style = Bark.type.mono.copy(color = c.muted), modifier = Modifier.weight(1f))
+            Text(
+                "Вернуть",
+                style = Bark.type.body.copy(color = c.text2),
+                modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { onRestore(l) }.padding(8.dp),
+            )
+        }
+    }
+}
+
+private val LABEL_CHOICES = listOf(
+    LabelKind.BARK to "Лай",
+    LabelKind.WHINE to "Скулёж",
+    LabelKind.HOWL to "Вой",
+    LabelKind.GROWL to "Рычание",
+    LabelKind.NOT_DOG to "Не собака или чужая",
+)
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun EpisodeRow(
     e: EpisodeInfo,
@@ -303,15 +357,26 @@ private fun EpisodeRow(
     playing: Boolean,
     progress: Float,
     onClick: (() -> Unit)?,
+    onLabel: ((LabelKind?) -> Unit)?,
 ) {
     val c = Bark.colors
+    var menu by remember { mutableStateOf(false) }
     Box(
         Modifier
             .fillMaxWidth()
             .height(44.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(if (playing) c.raised else Color.Transparent)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            .then(
+                if (onClick != null || onLabel != null) {
+                    Modifier.combinedClickable(
+                        onClick = { onClick?.invoke() },
+                        onLongClick = onLabel?.let { { menu = true } },
+                    )
+                } else {
+                    Modifier
+                },
+            ),
     ) {
         Row(
             Modifier.fillMaxSize().padding(horizontal = 4.dp),
@@ -321,11 +386,38 @@ private fun EpisodeRow(
             Spacer(Modifier.width(8.dp))
             Dot(c.of(e.kind))
             Spacer(Modifier.width(8.dp))
-            Text(Fmt.label(e.kind), style = Bark.type.body, modifier = Modifier.weight(1f))
+            Text(Fmt.label(e.kind), style = Bark.type.body)
+            if (e.label != null) {
+                // Подпись продукта — моноширинная мета: ответ пользователя, а не догадка модели.
+                Text("  · отмечено", style = Bark.type.mono.copy(color = c.muted))
+            }
+            Spacer(Modifier.weight(1f))
             Text(Fmt.duration((e.endMs - e.startMs).toLong()), style = Bark.type.mono)
             if (onClick != null) {
                 Spacer(Modifier.width(12.dp))
                 PlayGlyph(playing, if (playing) c.text else c.text2)
+            }
+        }
+        if (onLabel != null) {
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = c.card) {
+                Text(
+                    "Что это было?",
+                    style = Bark.type.caption,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                LABEL_CHOICES.forEach { (kind, text) ->
+                    DropdownMenuItem(
+                        text = { Text(text, style = Bark.type.body) },
+                        onClick = { menu = false; onLabel(kind) },
+                    )
+                }
+                if (e.label != null) {
+                    HorizontalDivider(color = c.line)
+                    DropdownMenuItem(
+                        text = { Text("Снять отметку", style = Bark.type.body.copy(color = c.text2)) },
+                        onClick = { menu = false; onLabel(null) },
+                    )
+                }
             }
         }
         if (playing) {

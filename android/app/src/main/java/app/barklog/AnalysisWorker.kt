@@ -159,4 +159,5 @@ fun BarkLogException.cleanMessage(): String = when (this) {
     is BarkLogException.Storage -> reason
     is BarkLogException.Cancelled -> "Анализ отменён"
     is BarkLogException.NotFound -> "Отчёт не найден"
+    is BarkLogException.Training -> reason
 }

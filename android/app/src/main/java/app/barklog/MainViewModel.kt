@@ -28,6 +28,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.barklog_ffi.BarkLogException
+import uniffi.barklog_ffi.LabelKind
+import uniffi.barklog_ffi.PersonalStatus
 import uniffi.barklog_ffi.SessionReport
 import uniffi.barklog_ffi.SessionSummary
 import java.util.UUID
@@ -130,8 +132,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** Личная модель: сколько отмечено, обучена ли, точность. */
+    private val _personal = MutableStateFlow<PersonalStatus?>(null)
+    val personal: StateFlow<PersonalStatus?> = _personal.asStateFlow()
+
+    private val _training = MutableStateFlow(false)
+    val training: StateFlow<Boolean> = _training.asStateFlow()
+
     init {
         refresh()
+    }
+
+    private fun refreshPersonal() {
+        viewModelScope.launch {
+            runCatching {
+                val core = barkApp.core()
+                _personal.value = withContext(Dispatchers.IO) { core.personalStatus() }
+            }
+        }
+    }
+
+    /** Ответ на эпизод; возвращает пересчитанный отчёт. */
+    suspend fun labelEpisode(sessionId: Long, startMs: Long, endMs: Long, label: LabelKind?): SessionReport? =
+        try {
+            val core = barkApp.core()
+            withContext(Dispatchers.IO) {
+                core.labelEpisode(sessionId, startMs.toULong(), endMs.toULong(), label)
+            }.also {
+                refresh()
+            }
+        } catch (e: BarkLogException) {
+            _error.value = e.cleanMessage()
+            null
+        }
+
+    fun trainPersonal() {
+        viewModelScope.launch {
+            _training.value = true
+            try {
+                val core = barkApp.core()
+                _personal.value = withContext(Dispatchers.Default) { core.trainPersonal() }
+                refresh()
+            } catch (e: BarkLogException) {
+                _error.value = e.cleanMessage()
+            } finally {
+                _training.value = false
+            }
+        }
+    }
+
+    fun resetPersonal() {
+        viewModelScope.launch {
+            _training.value = true
+            try {
+                val core = barkApp.core()
+                withContext(Dispatchers.Default) { core.resetPersonal() }
+                refresh()
+            } catch (e: BarkLogException) {
+                _error.value = e.cleanMessage()
+            } finally {
+                _training.value = false
+            }
+        }
     }
 
     fun refresh() {
@@ -139,6 +201,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val core = barkApp.core()
                 _sessions.value = withContext(Dispatchers.IO) { core.listSessions() }
+                refreshPersonal()
             } catch (e: BarkLogException) {
                 _error.value = e.cleanMessage()
                 _sessions.value = emptyList()

@@ -233,7 +233,7 @@ fn fit(samples: &[&(Vec<f32>, Label)]) -> PersonalModel {
 
     for epoch in 1..=EPOCHS {
         let mut gw = vec![0f32; w.len()];
-        let mut gb = vec![0f32; CLASSES];
+        let mut gb = [0f32; CLASSES];
         let mut total_weight = 0f32;
         for (x, (_, label)) in xs.iter().zip(samples) {
             let p = softmax(&logits(&w, &b, &present, x));

@@ -339,6 +339,8 @@ pub struct BarkLog {
 }
 
 const PERSONAL_MODEL: &str = "personal";
+/// Ниже этой точности на отложенной выборке модель не применяем.
+const MIN_PERSONAL_ACCURACY: f32 = 0.6;
 
 #[uniffi::export]
 impl BarkLog {
@@ -564,6 +566,15 @@ impl BarkLog {
         let model = core::personal::train(&samples).map_err(|e| BarkLogError::Training {
             reason: e.to_string(),
         })?;
+        // Плохая модель хуже никакой: она перепишет все отчёты. Такую не сохраняем.
+        if let Some(acc) = model.accuracy.filter(|&a| a < MIN_PERSONAL_ACCURACY) {
+            return Err(BarkLogError::Training {
+                reason: format!(
+                    "Модель пока плохо различает ваши отметки (угадала {:.0} % на проверке) и не применена. Отметьте больше разных эпизодов и проверьте, что отметки верные",
+                    acc * 100.0
+                ),
+            });
+        }
         let json = serde_json::to_string(&model).map_err(|e| BarkLogError::Storage {
             reason: e.to_string(),
         })?;
@@ -971,7 +982,8 @@ mod tests {
     fn labels_and_personal_model_recompute_reports() {
         use barklog_core::{Analysis, ClassScores, SoundClass, WindowResult};
         let Some(model) = model_path() else { return };
-        let db = std::env::temp_dir().join(format!("barklog-ffi-personal-{}.db", std::process::id()));
+        let db =
+            std::env::temp_dir().join(format!("barklog-ffi-personal-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let bl = BarkLog::new(db.to_string_lossy().into_owned(), model).unwrap();
 
@@ -1002,19 +1014,65 @@ mod tests {
             embeddings: (0..n).map(|i| (i as u32, emb(i))).collect(),
             windows,
         };
-        let report = build_report(&analysis, &ReportSettings::default(), None, Some("t".into()));
-        let id = bl.store.lock().unwrap().insert(&report, 1, None, Some(&analysis)).unwrap();
+        let report = build_report(
+            &analysis,
+            &ReportSettings::default(),
+            None,
+            Some("t".into()),
+        );
+        let id = bl
+            .store
+            .lock()
+            .unwrap()
+            .insert(&report, 1, None, Some(&analysis))
+            .unwrap();
         let before = bl.get_report(id).unwrap();
         assert!(before.editable);
         assert_eq!(before.dog_ms, n * 480);
 
-        // Мало отметок — обучение отказывается.
-        assert!(matches!(bl.train_personal(), Err(BarkLogError::Training { .. })));
+        // Одинаковые звуки с разными ответами — модель не различает их и не сохраняется.
+        {
+            let same = Analysis {
+                duration_ms: n * 480,
+                embeddings: (0..n).map(|i| (i as u32, emb(0))).collect(),
+                windows: analysis.windows.clone(),
+            };
+            let r2 = build_report(&same, &ReportSettings::default(), None, Some("same".into()));
+            let id2 = bl
+                .store
+                .lock()
+                .unwrap()
+                .insert(&r2, 2, None, Some(&same))
+                .unwrap();
+            bl.label_episode(id2, 0, 30 * 480, Some(LabelKind::Bark))
+                .unwrap();
+            bl.label_episode(id2, 30 * 480, n * 480, Some(LabelKind::NotDog))
+                .unwrap();
+            assert!(matches!(
+                bl.train_personal(),
+                Err(BarkLogError::Training { .. })
+            ));
+            assert!(!bl.personal_status().unwrap().trained);
+            bl.delete_session(id2).unwrap();
+        }
 
-        let tv = bl.label_episode(id, 30 * 480, n * 480, Some(LabelKind::NotDog)).unwrap();
-        assert_eq!(tv.dog_ms, 30 * 480, "отметка сразу убирает телевизор из голоса");
+        // Мало отметок — обучение отказывается.
+        assert!(matches!(
+            bl.train_personal(),
+            Err(BarkLogError::Training { .. })
+        ));
+
+        let tv = bl
+            .label_episode(id, 30 * 480, n * 480, Some(LabelKind::NotDog))
+            .unwrap();
+        assert_eq!(
+            tv.dog_ms,
+            30 * 480,
+            "отметка сразу убирает телевизор из голоса"
+        );
         assert_eq!(tv.labels.len(), 1);
-        bl.label_episode(id, 0, 30 * 480, Some(LabelKind::Bark)).unwrap();
+        bl.label_episode(id, 0, 30 * 480, Some(LabelKind::Bark))
+            .unwrap();
 
         let status = bl.train_personal().unwrap();
         assert!(status.trained);
@@ -1032,8 +1090,11 @@ mod tests {
         let bl = BarkLog::new(db.to_string_lossy().into_owned(), model_path().unwrap()).unwrap();
         assert!(bl.personal_status().unwrap().trained);
         bl.reset_personal().unwrap();
-        assert_eq!(bl.get_report(id).unwrap().dog_ms, n * 480, "без модели и отметок — как было");
+        assert_eq!(
+            bl.get_report(id).unwrap().dog_ms,
+            n * 480,
+            "без модели и отметок — как было"
+        );
         let _ = std::fs::remove_file(&db);
     }
-
 }

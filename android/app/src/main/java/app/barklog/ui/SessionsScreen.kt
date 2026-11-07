@@ -50,6 +50,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import uniffi.barklog_ffi.SessionSummary
 import app.barklog.remote.RemoteLive
+import uniffi.barklog_ffi.PersonalStatus
 import kotlin.math.roundToInt
 
 @Composable
@@ -66,6 +67,8 @@ fun SessionsScreen(
     val live by vm.live.collectAsStateWithLifecycle()
     val account by vm.account.collectAsStateWithLifecycle()
     val remote by vm.remoteLive.collectAsStateWithLifecycle()
+    val personal by vm.personal.collectAsStateWithLifecycle()
+    val training by vm.training.collectAsStateWithLifecycle()
     val c = Bark.colors
     val context = LocalContext.current
 
@@ -205,6 +208,16 @@ fun SessionsScreen(
             }
         }
 
+        // Подстройка показывается, когда есть что размечать.
+        if (!sessions.isNullOrEmpty()) {
+            personal?.let { p ->
+                item {
+                    Spacer(Modifier.height(24.dp))
+                    PersonalPanel(p, training, onTrain = vm::trainPersonal, onReset = vm::resetPersonal)
+                }
+            }
+        }
+
         if (vm.remoteAvailable) {
             item {
                 Spacer(Modifier.height(24.dp))
@@ -245,6 +258,40 @@ private fun RemoteCard(r: RemoteLive, onClick: () -> Unit) {
         Text(status, style = Bark.type.caption)
         Spacer(Modifier.height(12.dp))
         Text("Открыть", style = Bark.type.body)
+    }
+}
+
+/** Личная модель: сколько отмечено, обучить, сбросить. */
+@Composable
+private fun PersonalPanel(p: PersonalStatus, training: Boolean, onTrain: () -> Unit, onReset: () -> Unit) {
+    val c = Bark.colors
+    val available = p.availableSamples.toInt()
+    val need = p.minSamples.toInt()
+    Panel(Modifier.fillMaxWidth()) {
+        Text("Подстройка под вашу собаку", style = Bark.type.heading)
+        Spacer(Modifier.height(4.dp))
+        val text = when {
+            training -> "Обучаю и пересчитываю записи"
+            p.trained -> {
+                val total = p.samples.sumOf { it.toInt() }
+                val acc = p.accuracy?.let { " · точность ${Fmt.percent(it * 100)}" }.orEmpty()
+                "Модель обучена на $total фрагментах$acc. Новые записи она разбирает сама"
+            }
+            p.labeledEpisodes == 0u ->
+                "Откройте отчёт и удерживайте эпизод, чтобы указать, что это было: лай, скулёж, " +
+                    "вой или не собака. По этим ответам приложение научится звукам вашей собаки"
+            else -> "Отмечено ${Fmt.episodes(p.labeledEpisodes.toInt())} · " +
+                "фрагментов для обучения ${minOf(available, need)} из $need"
+        }
+        Text(text, style = Bark.type.caption)
+        if (!training && available >= need) {
+            Spacer(Modifier.height(16.dp))
+            SecondaryAction(if (p.trained) "Переобучить" else "Обучить", onClick = onTrain)
+        }
+        if (!training && p.trained) {
+            Spacer(Modifier.height(8.dp))
+            TextLink("Сбросить модель", c.text2, onReset)
+        }
     }
 }
 
