@@ -39,7 +39,60 @@ pub struct LiveSnapshot {
     pub recent_dog_ms: u64,
     /// Громкость последнего окна, дБFS.
     pub level_db: f32,
+    /// Идущий сейчас период активности (паузы до 30 с не прерывают его) —
+    /// по нему второй телефон решает, не пора ли прислать уведомление.
+    pub active_bout: Option<ActiveBout>,
     pub report: Report,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveBout {
+    /// Начало периода от начала записи.
+    pub start_ms: u64,
+    /// Сколько он длится к моменту снимка.
+    pub duration_ms: u64,
+    /// Чистое время голоса внутри периода.
+    pub sound_ms: u64,
+}
+
+/// Версия формата снимка для синхронизации между телефонами.
+pub const SYNC_FORMAT: u32 = 1;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("снимок записан более новой версией приложения (формат {0})")]
+    UnsupportedVersion(u32),
+    #[error("повреждённый снимок: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Serialize, Deserialize)]
+struct Envelope {
+    v: u32,
+    snapshot: LiveSnapshot,
+}
+
+impl LiveSnapshot {
+    /// Компактный JSON для отправки на другой телефон (без звука — только цифры).
+    pub fn to_sync_json(&self) -> String {
+        serde_json::to_string(&Envelope {
+            v: SYNC_FORMAT,
+            snapshot: self.clone(),
+        })
+        .expect("snapshot is always serializable")
+    }
+
+    pub fn from_sync_json(json: &str) -> Result<Self, SyncError> {
+        #[derive(Deserialize)]
+        struct Version {
+            v: u32,
+        }
+        let Version { v } = serde_json::from_str(json)?;
+        if v > SYNC_FORMAT {
+            return Err(SyncError::UnsupportedVersion(v));
+        }
+        Ok(serde_json::from_str::<Envelope>(json)?.snapshot)
+    }
 }
 
 pub struct LiveRecorder<M: Borrow<Yamnet>> {
@@ -139,10 +192,17 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
         let windows = &analysis.windows;
         let last_dog = windows.iter().rev().find(|w| w.class.is_dog());
         let analyzed = analysis.duration_ms;
+        let dog_now = last_dog.is_some_and(|w| w.start_ms + NOW_WINDOW_MS >= analyzed);
+        let active_bout = report.bouts.last().filter(|_| dog_now).map(|b| ActiveBout {
+            start_ms: b.start_ms,
+            duration_ms: analyzed.saturating_sub(b.start_ms),
+            sound_ms: b.sound_ms,
+        });
         LiveSnapshot {
             elapsed_ms: self.input_samples * 1000 / self.input_rate as u64,
             analyzed_ms: analyzed,
-            dog_now: last_dog.is_some_and(|w| w.start_ms + NOW_WINDOW_MS >= analyzed),
+            dog_now,
+            active_bout,
             last_dog_sound_ms: last_dog.map(|w| w.start_ms + PATCH_WINDOW_MS),
             recent_dog_ms: recent_dog_ms(&analysis, RECENT_MS),
             level_db: windows.last().map(|w| w.rms_db).unwrap_or(-120.0),
@@ -226,6 +286,24 @@ mod tests {
         );
         assert!(!snap.dog_now);
         assert_eq!(snap.report.stats.dog_time_ms, 0);
+
+        assert!(snap.active_bout.is_none());
+
+        // Снимок проходит через JSON без потерь, чужая версия формата отвергается.
+        let json = snap.to_sync_json();
+        let back = LiveSnapshot::from_sync_json(&json).unwrap();
+        assert_eq!(back.elapsed_ms, snap.elapsed_ms);
+        assert_eq!(back.report.timeline.len(), snap.report.timeline.len());
+        let future = json.replacen(&format!("\"v\":{SYNC_FORMAT}"), "\"v\":99", 1);
+        assert!(matches!(
+            LiveSnapshot::from_sync_json(&future),
+            Err(SyncError::UnsupportedVersion(99))
+        ));
+        assert!(
+            json.len() < 20_000,
+            "снимок 20 с должен быть маленьким: {}",
+            json.len()
+        );
 
         let (analysis, index) = rec.finish().unwrap();
         assert_eq!(analysis.duration_ms, 20_000);

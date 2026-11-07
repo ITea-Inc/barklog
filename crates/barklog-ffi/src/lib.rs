@@ -475,8 +475,37 @@ pub struct LiveSnapshot {
     pub recent_dog_ms: u64,
     /// Громкость последнего окна, дБFS.
     pub level_db: f32,
+    /// Идущий сейчас период лая: начало (от начала записи) и сколько длится.
+    pub active_bout_start_ms: Option<u64>,
+    pub active_bout_ms: Option<u64>,
     /// Отчёт по уже проанализированной части (id = -1).
     pub report: SessionReport,
+}
+
+impl From<core::LiveSnapshot> for LiveSnapshot {
+    fn from(s: core::LiveSnapshot) -> Self {
+        LiveSnapshot {
+            elapsed_ms: s.elapsed_ms,
+            analyzed_ms: s.analyzed_ms,
+            dog_now: s.dog_now,
+            last_dog_sound_ms: s.last_dog_sound_ms,
+            recent_dog_ms: s.recent_dog_ms,
+            level_db: s.level_db,
+            active_bout_start_ms: s.active_bout.map(|b| b.start_ms),
+            active_bout_ms: s.active_bout.map(|b| b.duration_ms),
+            report: SessionReport::from_core(-1, s.report, None),
+        }
+    }
+}
+
+/// Разбирает снимок, присланный другим телефоном (см. `LiveSession::snapshot_json`).
+#[uniffi::export]
+pub fn parse_live_snapshot(json: String) -> Result<LiveSnapshot> {
+    core::LiveSnapshot::from_sync_json(&json)
+        .map(Into::into)
+        .map_err(|e| BarkLogError::Storage {
+            reason: e.to_string(),
+        })
 }
 
 /// Идущая запись. Звук передаётся порциями из потока записи платформы.
@@ -499,16 +528,14 @@ impl LiveSession {
     pub fn snapshot(&self) -> Result<LiveSnapshot> {
         let guard = self.recorder.lock().unwrap();
         let rec = guard.as_ref().ok_or(BarkLogError::NotFound)?;
-        let s = rec.snapshot();
-        Ok(LiveSnapshot {
-            elapsed_ms: s.elapsed_ms,
-            analyzed_ms: s.analyzed_ms,
-            dog_now: s.dog_now,
-            last_dog_sound_ms: s.last_dog_sound_ms,
-            recent_dog_ms: s.recent_dog_ms,
-            level_db: s.level_db,
-            report: SessionReport::from_core(-1, s.report, None),
-        })
+        Ok(rec.snapshot().into())
+    }
+
+    /// Снимок в виде JSON для отправки на другой телефон: цифры и таймлайн, без звука.
+    pub fn snapshot_json(&self) -> Result<String> {
+        let guard = self.recorder.lock().unwrap();
+        let rec = guard.as_ref().ok_or(BarkLogError::NotFound)?;
+        Ok(rec.snapshot().to_sync_json())
     }
 
     /// Останавливает запись, сохраняет сессию и возвращает её id.
@@ -693,6 +720,8 @@ mod tests {
         }
         let snap = live.snapshot().unwrap();
         assert_eq!(snap.elapsed_ms, 5000);
+        let remote = parse_live_snapshot(live.snapshot_json().unwrap()).unwrap();
+        assert_eq!(remote, snap);
         assert_eq!(snap.report.id, -1);
         let live_id = live.finish().unwrap();
         assert!(matches!(live.snapshot(), Err(BarkLogError::NotFound)));
