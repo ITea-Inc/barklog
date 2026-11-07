@@ -41,14 +41,22 @@ pub struct FileSource {
 
 impl FileSource {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AudioError> {
-        let decoder = Decoder::open(path)?;
+        Ok(Self::new(Decoder::open(path)?))
+    }
+
+    /// См. [`Decoder::from_file`].
+    pub fn from_file(file: std::fs::File, ext: Option<&str>) -> Result<Self, AudioError> {
+        Ok(Self::new(Decoder::from_file(file, ext)?))
+    }
+
+    fn new(decoder: Decoder) -> Self {
         let resampler = Resampler::new(decoder.info().sample_rate, TARGET_RATE);
-        Ok(Self {
+        Self {
             decoder,
             resampler,
             raw: Vec::new(),
             flushed: false,
-        })
+        }
     }
 
     pub fn info(&self) -> &SourceInfo {

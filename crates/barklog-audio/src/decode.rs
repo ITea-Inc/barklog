@@ -38,11 +38,17 @@ pub struct Decoder {
 impl Decoder {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AudioError> {
         let path = path.as_ref();
-        let file = File::open(path)?;
+        let ext = path.extension().and_then(|e| e.to_str());
+        Self::from_file(File::open(path)?, ext)
+    }
+
+    /// Открывает уже открытый файл (на Android — дескриптор из ContentResolver).
+    /// `ext` — расширение из имени файла, подсказка для определения формата.
+    pub fn from_file(file: File, ext: Option<&str>) -> Result<Self, AudioError> {
         let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
 
         let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = ext {
             hint.with_extension(ext);
         }
 

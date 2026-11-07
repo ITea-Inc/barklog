@@ -12,8 +12,6 @@ const MAX_EPISODE_ROWS: usize = 300;
 pub struct HtmlInput<'a> {
     pub report: &'a Report,
     pub file_name: &'a str,
-    /// Откуда взято время начала записи (для подписи).
-    pub start_note: Option<&'a str>,
     /// Индекс эпизода → относительный путь к клипу.
     pub clips: &'a HashMap<usize, String>,
 }
@@ -125,8 +123,8 @@ pub fn render(input: &HtmlInput) -> String {
         r.settings.merge_gap_ms / 1000,
         percent(s.gated_percent)
     );
-    if let Some(note) = input.start_note {
-        let _ = write!(h, "<span>начало записи: {}</span>", escape(note));
+    if let Some(st) = &r.started_at {
+        let _ = write!(h, "<span>начало записи: {}</span>", st.source.label_ru());
     }
     h.push_str("</footer></main></body></html>");
     h
@@ -541,6 +539,7 @@ mod tests {
         let st = StartTime {
             unix_ms: 9 * 3_600_000 + 30 * 60_000,
             utc_offset_min: 0,
+            source: barklog_core::StartSource::Manual,
         };
         let t: Vec<String> = axis_ticks(Some(&st), 40 * 60_000)
             .into_iter()
@@ -551,6 +550,7 @@ mod tests {
         let st = StartTime {
             unix_ms: 9 * 3_600_000 + 47 * 60_000,
             utc_offset_min: 0,
+            source: barklog_core::StartSource::Manual,
         };
         let t = axis_ticks(Some(&st), 8 * 3_600_000);
         assert_eq!(t[0].1, "10:00");

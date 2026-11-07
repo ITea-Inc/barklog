@@ -32,6 +32,8 @@ pub struct StartTime {
     pub unix_ms: i64,
     /// Смещение локального времени от UTC в минутах.
     pub utc_offset_min: i32,
+    /// Откуда известно время начала.
+    pub source: crate::start::StartSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,6 +533,7 @@ mod tests {
         let start = StartTime {
             unix_ms: (6 * HOUR_MS + 45 * 60_000) as i64,
             utc_offset_min: 180,
+            source: crate::start::StartSource::Manual,
         };
         let r = build_report(&a, &ReportSettings::default(), Some(start), None);
         assert_eq!(r.hourly[0].hour, 9);

@@ -13,7 +13,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use barklog_audio::{AudioSource, FileSource, TARGET_RATE};
 use barklog_core::{
-    Report, ReportSettings, SoundClass, StartTime, Thresholds, analyze, build_report,
+    Report, ReportSettings, SoundClass, StartSource, StartTime, Thresholds, analyze, build_report,
+    start_from_modified, start_from_name,
 };
 use barklog_ml::Yamnet;
 use chrono::{Local, NaiveDateTime, TimeZone};
@@ -170,7 +171,7 @@ fn run_analyze(args: AnalyzeArgs) -> Result<()> {
     bar.finish_and_clear();
     let elapsed = started.elapsed();
 
-    let (started_at, start_note) = resolve_start(&args, analysis.duration_ms)?;
+    let started_at = resolve_start(&args, analysis.duration_ms)?;
     let settings = ReportSettings {
         merge_gap_ms: args.merge_gap * 1000,
         timeline_bin_ms: timeline_bin(analysis.duration_ms),
@@ -194,7 +195,6 @@ fn run_analyze(args: AnalyzeArgs) -> Result<()> {
     let html = html::render(&html::HtmlInput {
         report: &report,
         file_name: &file_name,
-        start_note: start_note.as_deref(),
         clips: &clips,
     });
     std::fs::write(out_dir.join("report.html"), html)?;
@@ -282,14 +282,8 @@ fn timeline_bin(duration_ms: u64) -> u64 {
 }
 
 /// Время начала: --start → дата в имени файла (20261107_093012) → время изменения файла минус длительность.
-fn resolve_start(
-    args: &AnalyzeArgs,
-    duration_ms: u64,
-) -> Result<(Option<StartTime>, Option<String>)> {
-    let to_start = |dt: chrono::DateTime<Local>| StartTime {
-        unix_ms: dt.timestamp_millis(),
-        utc_offset_min: dt.offset().local_minus_utc() / 60,
-    };
+fn resolve_start(args: &AnalyzeArgs, duration_ms: u64) -> Result<Option<StartTime>> {
+    let offset_min = Local::now().offset().local_minus_utc() / 60;
     if let Some(s) = &args.start {
         let naive = [
             "%Y-%m-%d %H:%M:%S",
@@ -306,42 +300,27 @@ fn resolve_start(
             .from_local_datetime(&naive)
             .earliest()
             .context("несуществующее местное время")?;
-        return Ok((Some(to_start(dt)), Some("указано вручную".into())));
+        return Ok(Some(StartTime {
+            unix_ms: dt.timestamp_millis(),
+            utc_offset_min: dt.offset().local_minus_utc() / 60,
+            source: StartSource::Manual,
+        }));
     }
     let name = args
         .file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    if let Some(naive) = datetime_in_name(&name)
-        && let Some(dt) = Local.from_local_datetime(&naive).earliest()
-    {
-        return Ok((Some(to_start(dt)), Some("из имени файла".into())));
+    if let Some(st) = start_from_name(&name, offset_min) {
+        return Ok(Some(st));
     }
-    if let Ok(modified) = std::fs::metadata(&args.file).and_then(|m| m.modified()) {
-        let end: chrono::DateTime<Local> = modified.into();
-        let start = end - chrono::Duration::milliseconds(duration_ms as i64);
-        return Ok((
-            Some(to_start(start)),
-            Some("по времени изменения файла, может быть неточным".into()),
-        ));
-    }
-    Ok((None, None))
-}
-
-/// Ищет в имени «ГГГГММДД_ЧЧММСС» или «ГГГГММДД-ЧЧММСС» (так называют файлы многие диктофоны).
-fn datetime_in_name(name: &str) -> Option<NaiveDateTime> {
-    let b = name.as_bytes();
-    (0..b.len().saturating_sub(14)).find_map(|i| {
-        let w = &b[i..i + 15];
-        let digits = |r: std::ops::Range<usize>| w[r].iter().all(u8::is_ascii_digit);
-        if digits(0..8) && (w[8] == b'_' || w[8] == b'-') && digits(9..15) {
-            let s = std::str::from_utf8(w).ok()?;
-            NaiveDateTime::parse_from_str(&format!("{}{}", &s[..8], &s[9..]), "%Y%m%d%H%M%S").ok()
-        } else {
-            None
-        }
-    })
+    let modified = std::fs::metadata(&args.file)
+        .and_then(|m| m.modified())
+        .ok();
+    Ok(modified.map(|m| {
+        let ms = chrono::DateTime::<Local>::from(m).timestamp_millis();
+        start_from_modified(ms, duration_ms, offset_min)
+    }))
 }
 
 /// Второй проход по файлу: сохраняет самые длинные эпизоды фрагментами WAV.
@@ -431,17 +410,5 @@ fn clip_name(c: SoundClass) -> &'static str {
         SoundClass::Growl => "growl",
         SoundClass::Other => "other",
         SoundClass::Silence => "silence",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_datetime_in_file_name() {
-        let dt = datetime_in_name("Voice_20261107_093012").unwrap();
-        assert_eq!(dt.to_string(), "2026-11-07 09:30:12");
-        assert!(datetime_in_name("Запись 12").is_none());
     }
 }
