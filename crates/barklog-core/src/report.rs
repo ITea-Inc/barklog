@@ -16,6 +16,23 @@ pub struct ReportSettings {
     pub timeline_bin_ms: u64,
 }
 
+impl ReportSettings {
+    /// Настройки по умолчанию со столбцом таймлайна под длину записи:
+    /// на графике получается от 60 до 600 столбцов.
+    pub fn for_duration(duration_ms: u64) -> Self {
+        let timeline_bin_ms = match duration_ms {
+            d if d <= 20 * 60_000 => 10_000,
+            d if d <= 3 * 3_600_000 => 30_000,
+            d if d <= 10 * 3_600_000 => 60_000,
+            _ => 120_000,
+        };
+        Self {
+            timeline_bin_ms,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for ReportSettings {
     fn default() -> Self {
         Self {

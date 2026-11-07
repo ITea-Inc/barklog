@@ -174,8 +174,7 @@ fn run_analyze(args: AnalyzeArgs) -> Result<()> {
     let started_at = resolve_start(&args, analysis.duration_ms)?;
     let settings = ReportSettings {
         merge_gap_ms: args.merge_gap * 1000,
-        timeline_bin_ms: timeline_bin(analysis.duration_ms),
-        ..ReportSettings::default()
+        ..ReportSettings::for_duration(analysis.duration_ms)
     };
     let mut report = build_report(&analysis, &settings, started_at, Some(file_name.clone()));
 
@@ -269,16 +268,6 @@ fn default_out_dir(file: &Path) -> PathBuf {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or("recording".into());
     file.with_file_name(format!("{stem}_barklog"))
-}
-
-/// Ширина столбца таймлайна, чтобы на графике было от 60 до 600 столбцов.
-fn timeline_bin(duration_ms: u64) -> u64 {
-    match duration_ms {
-        d if d <= 20 * 60_000 => 10_000,
-        d if d <= 3 * 3_600_000 => 30_000,
-        d if d <= 10 * 3_600_000 => 60_000,
-        _ => 120_000,
-    }
 }
 
 /// Время начала: --start → дата в имени файла (20261107_093012) → время изменения файла минус длительность.
