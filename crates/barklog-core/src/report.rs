@@ -444,6 +444,7 @@ mod tests {
         Analysis {
             duration_ms: windows.len() as u64 * PATCH_HOP_MS,
             windows,
+            embeddings: Vec::new(),
         }
     }
 

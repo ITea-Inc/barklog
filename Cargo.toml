@@ -29,6 +29,7 @@ indicatif = "0.18"
 chrono = "0.4"
 rusqlite = { version = "0.41", features = ["bundled"] }
 uniffi = "0.32"
+half = { version = "2.7", features = ["serde"] }
 
 [profile.release]
 lto = "thin"

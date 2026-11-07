@@ -2,7 +2,9 @@
 
 pub mod classify;
 pub mod clips;
+pub mod compact;
 pub mod live;
+pub mod personal;
 pub mod pipeline;
 pub mod report;
 pub mod start;
@@ -10,7 +12,9 @@ pub mod start;
 use serde::{Deserialize, Serialize};
 
 pub use classify::{ClassScores, Thresholds};
+pub use compact::EpisodeLabel;
 pub use live::{ActiveBout, LiveRecorder, LiveSnapshot, SYNC_FORMAT, SyncError};
+pub use personal::{Label, PersonalModel, TrainError};
 pub use pipeline::{Analysis, AnalyzeError, Progress, StreamAnalyzer, WindowResult, analyze};
 pub use report::{Episode, Report, ReportSettings, StartTime, Stats, build_report};
 pub use start::{StartSource, start_from_modified, start_from_name};

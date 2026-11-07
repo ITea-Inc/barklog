@@ -19,6 +19,8 @@ pub enum MlError {
 
 /// Индексы классов AudioSet, относящихся к собакам (см. `yamnet_class_map.csv`).
 pub mod audioset {
+    pub const ANIMAL: usize = 67;
+    pub const DOMESTIC_ANIMALS: usize = 68;
     pub const DOG: usize = 69;
     pub const BARK: usize = 70;
     pub const YIP: usize = 71;

@@ -163,7 +163,7 @@ fn run_analyze(args: AnalyzeArgs) -> Result<()> {
         dog_min: args.dog_min,
         ..Thresholds::default()
     };
-    let analysis = analyze(&mut source, &model, thresholds, !args.no_gate, |p| {
+    let analysis = analyze(&mut source, &model, thresholds, !args.no_gate, None, |p| {
         bar.set_position(p.processed_ms);
         bar.set_message(fmt::counter(p.processed_ms));
         true

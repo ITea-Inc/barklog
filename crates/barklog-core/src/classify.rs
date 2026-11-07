@@ -39,6 +39,9 @@ pub struct ClassScores {
     pub howl: f32,
     pub growl: f32,
     pub silence: f32,
+    /// «Животное» / «домашние животные» — повод показать окно личной модели.
+    #[serde(default)]
+    pub animal: f32,
 }
 
 impl ClassScores {
@@ -54,6 +57,7 @@ impl ClassScores {
             .max(howl)
             .max(growl)
             .max(s[a::WHIMPER_DOG]);
+        let animal = s[a::ANIMAL].max(s[a::DOMESTIC_ANIMALS]);
         Self {
             dog,
             bark,
@@ -61,6 +65,7 @@ impl ClassScores {
             howl,
             growl,
             silence: s[a::SILENCE],
+            animal,
         }
     }
 }

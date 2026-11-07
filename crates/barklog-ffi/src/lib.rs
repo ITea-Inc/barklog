@@ -5,11 +5,13 @@
 
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use barklog_audio::{AudioSource, FileSource};
 use barklog_core as core;
-use barklog_core::{AnalyzeError, LiveRecorder, ReportSettings, Thresholds, analyze, build_report};
+use barklog_core::{
+    AnalyzeError, LiveRecorder, PersonalModel, ReportSettings, Thresholds, analyze, build_report,
+};
 use barklog_ml::Yamnet;
 use barklog_store::Store;
 
@@ -27,6 +29,8 @@ pub enum BarkLogError {
     Cancelled,
     #[error("сессия не найдена")]
     NotFound,
+    #[error("{reason}")]
+    Training { reason: String },
 }
 
 impl From<barklog_store::StoreError> for BarkLogError {
@@ -136,6 +140,67 @@ pub struct EpisodeInfo {
     pub sound_ms: u64,
     pub peak_db: f32,
     pub confidence: f32,
+    /// Ответ пользователя на этот эпизод, если он есть.
+    pub label: Option<LabelKind>,
+}
+
+/// Ответ пользователя «что это было».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LabelKind {
+    Bark,
+    Whine,
+    Howl,
+    Growl,
+    NotDog,
+}
+
+impl From<core::Label> for LabelKind {
+    fn from(l: core::Label) -> Self {
+        match l {
+            core::Label::Bark => LabelKind::Bark,
+            core::Label::Whine => LabelKind::Whine,
+            core::Label::Howl => LabelKind::Howl,
+            core::Label::Growl => LabelKind::Growl,
+            core::Label::NotDog => LabelKind::NotDog,
+        }
+    }
+}
+
+impl From<LabelKind> for core::Label {
+    fn from(l: LabelKind) -> Self {
+        match l {
+            LabelKind::Bark => core::Label::Bark,
+            LabelKind::Whine => core::Label::Whine,
+            LabelKind::Howl => core::Label::Howl,
+            LabelKind::Growl => core::Label::Growl,
+            LabelKind::NotDog => core::Label::NotDog,
+        }
+    }
+}
+
+/// Отмеченный пользователем отрезок записи.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct LabelInfo {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub label: LabelKind,
+}
+
+/// Состояние личной модели.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PersonalStatus {
+    pub trained: bool,
+    pub trained_at_ms: Option<i64>,
+    /// Окон в обучении по классам: лай, скулёж, вой, рычание, не собака.
+    pub samples: Vec<u32>,
+    /// Точность на отложенной выборке, 0..1.
+    pub accuracy: Option<f32>,
+    /// Сколько эпизодов отмечено во всех записях.
+    pub labeled_episodes: u32,
+    /// Сколько окон с отпечатками есть внутри отмеченных эпизодов (материал для обучения).
+    pub available_samples: u32,
+    /// Минимум окон для обучения.
+    pub min_samples: u32,
 }
 
 /// Время по классам — в порядке `SoundKind` (лай, скулёж, вой, рычание, прочее, тишина).
@@ -154,6 +219,10 @@ pub struct SessionReport {
     pub source_name: String,
     /// Ссылка на исходный файл для прослушивания эпизодов, если она сохранена.
     pub source_uri: Option<String>,
+    /// Можно ли отмечать эпизоды (для записей старых версий — нельзя).
+    pub editable: bool,
+    /// Ответы пользователя, включая «не собака» (такие эпизоды из списка пропадают).
+    pub labels: Vec<LabelInfo>,
     pub started_at: Option<StartInfo>,
     pub duration_ms: u64,
     pub dog_ms: u64,
@@ -179,6 +248,8 @@ impl SessionReport {
             id,
             source_name: r.source.unwrap_or_default(),
             source_uri,
+            editable: false,
+            labels: Vec::new(),
             started_at: r.started_at.map(Into::into),
             duration_ms: s.duration_ms,
             dog_ms: s.dog_time_ms,
@@ -213,6 +284,7 @@ impl SessionReport {
                     sound_ms: e.sound_ms,
                     peak_db: e.peak_db,
                     confidence: e.confidence,
+                    label: None,
                 })
                 .collect(),
             timeline: r
@@ -263,7 +335,10 @@ pub struct SourceFile {
 pub struct BarkLog {
     model: Arc<Yamnet>,
     store: Arc<Mutex<Store>>,
+    personal: RwLock<Option<Arc<PersonalModel>>>,
 }
+
+const PERSONAL_MODEL: &str = "personal";
 
 #[uniffi::export]
 impl BarkLog {
@@ -274,9 +349,16 @@ impl BarkLog {
             reason: e.to_string(),
         })?;
         let store = Store::open(&db_path)?;
+        // Повреждённую или устаревшую личную модель просто не используем.
+        let personal = store
+            .load_model(PERSONAL_MODEL)?
+            .and_then(|(json, _)| serde_json::from_str::<PersonalModel>(&json).ok())
+            .filter(|m| m.version == PersonalModel::VERSION)
+            .map(Arc::new);
         Ok(Arc::new(Self {
             model: Arc::new(model),
             store: Arc::new(Mutex::new(store)),
+            personal: RwLock::new(personal),
         }))
     }
 
@@ -340,13 +422,26 @@ impl BarkLog {
     }
 
     pub fn get_report(&self, id: i64) -> Result<SessionReport> {
-        let (report, uri) = self
-            .store
-            .lock()
-            .unwrap()
-            .get_with_source(id)?
-            .ok_or(BarkLogError::NotFound)?;
-        Ok(SessionReport::from_core(id, report, uri))
+        let store = self.store.lock().unwrap();
+        let (report, uri) = store.get_with_source(id)?.ok_or(BarkLogError::NotFound)?;
+        let labels = store.labels(id)?;
+        let mut out = SessionReport::from_core(id, report, uri);
+        out.editable = store.has_analysis(id)?;
+        for e in &mut out.episodes {
+            e.label = labels
+                .iter()
+                .find(|l| l.start_ms < e.end_ms && e.start_ms < l.end_ms)
+                .map(|l| l.label.into());
+        }
+        out.labels = labels
+            .iter()
+            .map(|l| LabelInfo {
+                start_ms: l.start_ms,
+                end_ms: l.end_ms,
+                label: l.label.into(),
+            })
+            .collect();
+        Ok(out)
     }
 
     /// Начинает живую запись. `input_rate` — частота микрофона (моно, PCM 16 бит),
@@ -371,7 +466,8 @@ impl BarkLog {
             started_at,
             &dir,
         )
-        .map_err(storage_error)?;
+        .map_err(storage_error)?
+        .with_personal(self.personal());
         Ok(Arc::new(LiveSession {
             recorder: Mutex::new(Some(recorder)),
             store: self.store.clone(),
@@ -395,12 +491,130 @@ impl BarkLog {
         Ok(samples.iter().flat_map(|v| v.to_le_bytes()).collect())
     }
 
+    /// Ответ пользователя на эпизод (`label = None` — снять ответ). Отчёт сразу
+    /// пересчитывается; возвращается обновлённый отчёт.
+    pub fn label_episode(
+        &self,
+        session_id: i64,
+        start_ms: u64,
+        end_ms: u64,
+        label: Option<LabelKind>,
+    ) -> Result<SessionReport> {
+        {
+            let store = self.store.lock().unwrap();
+            if !store.has_analysis(session_id)? {
+                return Err(BarkLogError::Training {
+                    reason:
+                        "эту запись сделала старая версия приложения — отметки для неё недоступны"
+                            .into(),
+                });
+            }
+            store.set_label(session_id, start_ms, end_ms, label.map(Into::into))?;
+        }
+        self.recompute(session_id)?;
+        self.get_report(session_id)
+    }
+
+    pub fn personal_status(&self) -> Result<PersonalStatus> {
+        let store = self.store.lock().unwrap();
+        let (model, trained_at) = match store.load_model(PERSONAL_MODEL)? {
+            Some((json, at)) => (serde_json::from_str::<PersonalModel>(&json).ok(), Some(at)),
+            None => (None, None),
+        };
+        let mut available = 0u32;
+        for id in store.sessions_with_analysis()? {
+            let labels = store.labels(id)?;
+            if labels.is_empty() {
+                continue;
+            }
+            if let Some(a) = store.analysis(id)? {
+                available += core::compact::training_samples(&a, &labels).len() as u32;
+            }
+        }
+        Ok(PersonalStatus {
+            trained: model.is_some(),
+            trained_at_ms: trained_at.filter(|_| model.is_some()),
+            samples: model
+                .as_ref()
+                .map(|m| m.samples.clone())
+                .unwrap_or_default(),
+            accuracy: model.as_ref().and_then(|m| m.accuracy),
+            labeled_episodes: store.label_count()?,
+            available_samples: available,
+            min_samples: core::personal::MIN_SAMPLES as u32,
+        })
+    }
+
+    /// Обучает личную модель на всех отмеченных эпизодах и пересчитывает ею все записи.
+    pub fn train_personal(&self) -> Result<PersonalStatus> {
+        let samples = {
+            let store = self.store.lock().unwrap();
+            let mut all = Vec::new();
+            for id in store.sessions_with_analysis()? {
+                let labels = store.labels(id)?;
+                if labels.is_empty() {
+                    continue;
+                }
+                if let Some(a) = store.analysis(id)? {
+                    all.extend(core::compact::training_samples(&a, &labels));
+                }
+            }
+            all
+        };
+        let model = core::personal::train(&samples).map_err(|e| BarkLogError::Training {
+            reason: e.to_string(),
+        })?;
+        let json = serde_json::to_string(&model).map_err(|e| BarkLogError::Storage {
+            reason: e.to_string(),
+        })?;
+        self.store
+            .lock()
+            .unwrap()
+            .save_model(PERSONAL_MODEL, &json, now_ms())?;
+        *self.personal.write().unwrap() = Some(Arc::new(model));
+        self.recompute_all()?;
+        self.personal_status()
+    }
+
+    /// Забывает личную модель; записи пересчитываются обратно по YAMNet и отметкам.
+    pub fn reset_personal(&self) -> Result<()> {
+        self.store.lock().unwrap().delete_model(PERSONAL_MODEL)?;
+        *self.personal.write().unwrap() = None;
+        self.recompute_all()
+    }
+
     pub fn delete_session(&self, id: i64) -> Result<bool> {
         Ok(self.store.lock().unwrap().delete(id)?)
     }
 }
 
 impl BarkLog {
+    fn personal(&self) -> Option<Arc<PersonalModel>> {
+        self.personal.read().unwrap().clone()
+    }
+
+    /// Пересчитывает отчёт сессии по сохранённым окнам, личной модели и отметкам.
+    fn recompute(&self, id: i64) -> Result<()> {
+        let store = self.store.lock().unwrap();
+        let Some(mut analysis) = store.analysis(id)? else {
+            return Ok(());
+        };
+        let old = store.get(id)?.ok_or(BarkLogError::NotFound)?;
+        let labels = store.labels(id)?;
+        core::compact::reclassify(&mut analysis, self.personal().as_deref(), &labels);
+        let report = build_report(&analysis, &old.settings, old.started_at, old.source);
+        store.update_report(id, &report)?;
+        Ok(())
+    }
+
+    fn recompute_all(&self) -> Result<()> {
+        let ids = self.store.lock().unwrap().sessions_with_analysis()?;
+        for id in ids {
+            self.recompute(id)?;
+        }
+        Ok(())
+    }
+
     fn analyze_file(
         &self,
         f: File,
@@ -413,9 +627,15 @@ impl BarkLog {
             .map(str::to_owned);
         let mut source = FileSource::from_file(f, ext.as_deref())?;
 
-        let analysis = analyze(&mut source, &self.model, Thresholds::default(), true, |p| {
-            listener.on_progress(p.processed_ms, p.total_ms)
-        })
+        let personal = self.personal();
+        let analysis = analyze(
+            &mut source,
+            &self.model,
+            Thresholds::default(),
+            true,
+            personal,
+            |p| listener.on_progress(p.processed_ms, p.total_ms),
+        )
         .map_err(|e| match e {
             AnalyzeError::Cancelled => BarkLogError::Cancelled,
             AnalyzeError::Audio(e) => e.into(),
@@ -440,7 +660,7 @@ impl BarkLog {
             .store
             .lock()
             .unwrap()
-            .insert(&report, now, file.uri.as_deref())?)
+            .insert(&report, now, file.uri.as_deref(), Some(&analysis))?)
     }
 }
 
@@ -560,7 +780,7 @@ impl LiveSession {
             .store
             .lock()
             .unwrap()
-            .insert(&report, now_ms(), Some(&uri))?)
+            .insert(&report, now_ms(), Some(&uri), Some(&analysis))?)
     }
 }
 
@@ -746,4 +966,74 @@ mod tests {
         assert!(matches!(bl.get_report(id), Err(BarkLogError::NotFound)));
         let _ = std::fs::remove_file(&db);
     }
+
+    #[test]
+    fn labels_and_personal_model_recompute_reports() {
+        use barklog_core::{Analysis, ClassScores, SoundClass, WindowResult};
+        let Some(model) = model_path() else { return };
+        let db = std::env::temp_dir().join(format!("barklog-ffi-personal-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let bl = BarkLog::new(db.to_string_lossy().into_owned(), model).unwrap();
+
+        // 60 «собачьих» окон: первые 30 — настоящий лай (центр A), вторые 30 —
+        // телевизор, который YAMNet тоже принял за лай (центр B).
+        let n = 60u64;
+        let windows: Vec<WindowResult> = (0..n)
+            .map(|i| WindowResult {
+                start_ms: i * 480,
+                class: SoundClass::Bark,
+                confidence: 0.6,
+                rms_db: -25.0,
+                peak_db: -15.0,
+                gated: false,
+                scores: ClassScores::default(),
+            })
+            .collect();
+        let emb = |i: u64| -> Vec<half::f16> {
+            (0..1024)
+                .map(|k| {
+                    let center = if (k % 2 == 0) == (i < 30) { 1.0 } else { 0.0 };
+                    half::f16::from_f32(center + ((i * 7 + k as u64) % 13) as f32 * 0.02)
+                })
+                .collect()
+        };
+        let analysis = Analysis {
+            duration_ms: n * 480,
+            embeddings: (0..n).map(|i| (i as u32, emb(i))).collect(),
+            windows,
+        };
+        let report = build_report(&analysis, &ReportSettings::default(), None, Some("t".into()));
+        let id = bl.store.lock().unwrap().insert(&report, 1, None, Some(&analysis)).unwrap();
+        let before = bl.get_report(id).unwrap();
+        assert!(before.editable);
+        assert_eq!(before.dog_ms, n * 480);
+
+        // Мало отметок — обучение отказывается.
+        assert!(matches!(bl.train_personal(), Err(BarkLogError::Training { .. })));
+
+        let tv = bl.label_episode(id, 30 * 480, n * 480, Some(LabelKind::NotDog)).unwrap();
+        assert_eq!(tv.dog_ms, 30 * 480, "отметка сразу убирает телевизор из голоса");
+        assert_eq!(tv.labels.len(), 1);
+        bl.label_episode(id, 0, 30 * 480, Some(LabelKind::Bark)).unwrap();
+
+        let status = bl.train_personal().unwrap();
+        assert!(status.trained);
+        assert_eq!(status.samples, vec![30, 0, 0, 0, 30]);
+        assert_eq!(status.labeled_episodes, 2);
+
+        // Снимаем отметки — теперь классы решает только личная модель, и она уже знает разницу.
+        bl.label_episode(id, 0, 0, None).unwrap();
+        let after = bl.label_episode(id, 30 * 480, 0, None).unwrap();
+        assert!(after.labels.is_empty());
+        assert_eq!(after.dog_ms, 30 * 480);
+
+        // Модель переживает перезапуск.
+        drop(bl);
+        let bl = BarkLog::new(db.to_string_lossy().into_owned(), model_path().unwrap()).unwrap();
+        assert!(bl.personal_status().unwrap().trained);
+        bl.reset_personal().unwrap();
+        assert_eq!(bl.get_report(id).unwrap().dog_ms, n * 480, "без модели и отметок — как было");
+        let _ = std::fs::remove_file(&db);
+    }
+
 }

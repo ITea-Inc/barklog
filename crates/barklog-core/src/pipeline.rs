@@ -1,6 +1,9 @@
 //! Потоковый анализ: сигнал 16 кГц → патчи → гейт по громкости → YAMNet → окна.
 
 use std::borrow::Borrow;
+use std::sync::Arc;
+
+use half::f16;
 
 use barklog_audio::{AudioError, AudioSource, TARGET_RATE};
 use barklog_ml::{FeatureExtractor, PATCH_HOP_MS, Patch, Yamnet};
@@ -8,12 +11,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::SoundClass;
 use crate::classify::{ClassScores, Thresholds, decide};
+use crate::personal::{PersonalModel, to_f16};
 
 /// Сколько патчей копить перед запуском сети (≈ 30 с звука). Большой пакет
 /// эффективнее; для живой записи берут меньше — см. [`StreamAnalyzer::with_batch`].
 const BATCH_PATCHES: usize = 64;
 /// Насколько быстро оценка фонового шума может расти, дБ на окно (≈ 6 дБ в минуту).
 const FLOOR_RISE_DB: f32 = 0.05;
+/// Окно — кандидат для личной модели, если YAMNet хоть немного слышит собаку или животное.
+/// Порог ниже `dog_min`: так личная модель может «спасти» тихий скулёж.
+const CANDIDATE_DOG: f32 = 0.05;
+const CANDIDATE_ANIMAL: f32 = 0.2;
+/// Сколько эмбеддингов держать за сессию (по 2 КБ): хватает на ~1,5 ч голоса собаки.
+const MAX_EMBEDDINGS: usize = 12_000;
 /// Шаг вызова колбэка прогресса.
 const PROGRESS_STEP_MS: u64 = 1_000;
 
@@ -31,10 +41,14 @@ pub struct WindowResult {
 }
 
 /// Результат анализа записи целиком.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Analysis {
     pub duration_ms: u64,
     pub windows: Vec<WindowResult>,
+    /// Эмбеддинги YAMNet для собачьих и «спорных» окон: (номер окна, вектор f16).
+    /// Нужны, чтобы обучать личную модель и пересчитывать ею старые записи.
+    #[serde(skip)]
+    pub embeddings: Vec<(u32, Vec<f16>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,12 +77,14 @@ pub enum AnalyzeError {
 /// Модель — `&Yamnet` или `Arc<Yamnet>` (когда анализатор живёт дольше вызова).
 pub struct StreamAnalyzer<M: Borrow<Yamnet>> {
     model: M,
+    personal: Option<Arc<PersonalModel>>,
     batch: usize,
     thresholds: Thresholds,
     use_gate: bool,
     features: FeatureExtractor,
     pending: Vec<Patch>,
     windows: Vec<WindowResult>,
+    embeddings: Vec<(u32, Vec<f16>)>,
     noise_floor_db: Option<f32>,
     gated: usize,
 }
@@ -77,12 +93,14 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
     pub fn new(model: M, thresholds: Thresholds) -> Self {
         Self {
             model,
+            personal: None,
             batch: BATCH_PATCHES,
             thresholds,
             use_gate: true,
             features: FeatureExtractor::new(),
             pending: Vec::new(),
             windows: Vec::new(),
+            embeddings: Vec::new(),
             noise_floor_db: None,
             gated: 0,
         }
@@ -91,6 +109,12 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
     /// Отключает гейт по громкости: каждое окно идёт в сеть (медленнее, для сверки).
     pub fn without_gate(mut self) -> Self {
         self.use_gate = false;
+        self
+    }
+
+    /// Личная модель уточняет класс «спорных» окон (см. [`crate::personal`]).
+    pub fn with_personal(mut self, model: Option<Arc<PersonalModel>>) -> Self {
+        self.personal = model;
         self
     }
 
@@ -127,6 +151,7 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
         Analysis {
             duration_ms: covered,
             windows: self.windows.clone(),
+            embeddings: Vec::new(),
         }
     }
 
@@ -139,9 +164,15 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
         while windows.len() > 1 && windows.last().is_some_and(|w| w.start_ms >= duration_ms) {
             windows.pop();
         }
+        let embeddings = self
+            .embeddings
+            .into_iter()
+            .filter(|(i, _)| (*i as usize) < windows.len())
+            .collect();
         Analysis {
             duration_ms,
             windows,
+            embeddings,
         }
     }
 
@@ -170,7 +201,15 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
             } else {
                 let pred = predictions.next().expect("one prediction per patch");
                 let scores = ClassScores::from_audioset(&pred.scores);
-                let (class, conf) = decide(&scores, &self.thresholds);
+                let candidate = scores.dog >= CANDIDATE_DOG || scores.animal >= CANDIDATE_ANIMAL;
+                let (class, conf) = match &self.personal {
+                    Some(m) if candidate => m.decide(&pred.embedding),
+                    _ => decide(&scores, &self.thresholds),
+                };
+                if (candidate || class.is_dog()) && self.embeddings.len() < MAX_EMBEDDINGS {
+                    let index = self.windows.len() as u32;
+                    self.embeddings.push((index, to_f16(&pred.embedding)));
+                }
                 (class, conf, scores)
             };
             self.windows.push(WindowResult {
@@ -206,9 +245,10 @@ pub fn analyze(
     model: &Yamnet,
     thresholds: Thresholds,
     use_gate: bool,
+    personal: Option<Arc<PersonalModel>>,
     mut progress: impl FnMut(Progress) -> bool,
 ) -> Result<Analysis, AnalyzeError> {
-    let mut analyzer = StreamAnalyzer::new(model, thresholds);
+    let mut analyzer = StreamAnalyzer::new(model, thresholds).with_personal(personal);
     if !use_gate {
         analyzer = analyzer.without_gate();
     }

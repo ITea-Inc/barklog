@@ -131,6 +131,12 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
         })
     }
 
+    /// Личная модель для уточнения классов (см. [`crate::personal`]).
+    pub fn with_personal(mut self, model: Option<std::sync::Arc<crate::PersonalModel>>) -> Self {
+        self.analyzer = self.analyzer.with_personal(model);
+        self
+    }
+
     pub fn started_at(&self) -> StartTime {
         self.started_at
     }

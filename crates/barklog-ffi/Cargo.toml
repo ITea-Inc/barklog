@@ -25,7 +25,9 @@ barklog-ml.workspace = true
 barklog-core.workspace = true
 barklog-store.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true
 uniffi.workspace = true
 
 [dev-dependencies]
 hound.workspace = true
+half.workspace = true
