@@ -442,7 +442,7 @@ fn episodes(h: &mut String, input: &HtmlInput) {
 const HEAD: &str = r#"<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#fafafa;--card:#fff;--raised:#f4f4f5;--line:rgba(23,23,23,.08);
@@ -464,7 +464,7 @@ const HEAD: &str = r#"<!doctype html><html lang="ru"><head><meta charset="utf-8"
   --shadow:none;color-scheme:dark;
 }
 *{box-sizing:border-box;margin:0}
-body{background:var(--bg);color:var(--text);font:400 14px/20px "Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+body{background:var(--bg);color:var(--text);font:400 14px/20px "Golos Text",system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
 .mono{font-family:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;font-variant-numeric:tabular-nums;font-size:12px}
 .muted{color:var(--muted)}
 .page{max-width:1200px;margin:0 auto;padding:24px 32px 48px}

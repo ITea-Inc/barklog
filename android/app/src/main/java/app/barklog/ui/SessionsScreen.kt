@@ -50,6 +50,7 @@ fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val analysis by vm.analysis.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
+    val dismissed by vm.dismissedAnalysis.collectAsStateWithLifecycle()
     val c = Bark.colors
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -113,9 +114,16 @@ fun SessionsScreen(vm: MainViewModel, onOpen: (Long) -> Unit) {
             }
         }
 
-        analysis?.takeIf { it.visible() }?.let { a ->
+        analysis?.takeIf { it.visible() && !(it.state.isFinished && it.id == dismissed) }?.let { a ->
             item {
-                AnalysisCard(a, onCancel = vm::cancelAnalysis, onOpen = { a.sessionId?.let(onOpen) })
+                AnalysisCard(
+                    a,
+                    onCancel = vm::cancelAnalysis,
+                    onOpen = {
+                        vm.dismissAnalysis(a.id)
+                        a.sessionId?.let(onOpen)
+                    },
+                )
                 Spacer(Modifier.height(12.dp))
             }
         }
@@ -190,17 +198,14 @@ private fun AnalysisCard(a: AnalysisState, onCancel: () -> Unit, onOpen: () -> U
                     drawStopIndicator = {},
                 )
             }
-            Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onCancel, contentPadding = PaddingValues(0.dp)) {
-                Text("Отменить", style = Bark.type.body.copy(color = c.text2))
-            }
+            Spacer(Modifier.height(12.dp))
+            TextLink("Отменить", c.text2, onCancel)
         } else if (a.state == WorkInfo.State.FAILED) {
             Spacer(Modifier.height(8.dp))
             Text(a.error.orEmpty(), style = Bark.type.body.copy(color = c.danger))
         } else {
-            TextButton(onClick = onOpen, contentPadding = PaddingValues(0.dp)) {
-                Text("Открыть отчёт", style = Bark.type.body)
-            }
+            Spacer(Modifier.height(12.dp))
+            TextLink("Открыть отчёт", c.text, onOpen)
         }
     }
 }
@@ -238,4 +243,17 @@ private fun SessionRow(s: SessionSummary, onClick: () -> Unit) {
             Text(Fmt.duration(s.durationMs), style = Bark.type.mono.copy(color = c.text2))
         }
     }
+}
+
+/** Текстовая кнопка без минимальной высоты 48 dp у TextButton — она раздувала карточку снизу. */
+@Composable
+private fun TextLink(text: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
+    Text(
+        text,
+        style = Bark.type.body.copy(color = color),
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+    )
 }

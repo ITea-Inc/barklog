@@ -45,13 +45,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** null — ещё загружается. */
     val sessions: StateFlow<List<SessionSummary>?> = _sessions.asStateFlow()
 
+    private val _dismissed = MutableStateFlow<UUID?>(null)
+    /** Карточка завершённого анализа, которую пользователь уже видел (открыл отчёт). */
+    val dismissedAnalysis: StateFlow<UUID?> = _dismissed.asStateFlow()
+
+    fun dismissAnalysis(id: UUID) {
+        _dismissed.value = id
+    }
+
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
     val analysis: StateFlow<AnalysisState?> = work.getWorkInfosForUniqueWorkFlow(AnalysisWorker.UNIQUE_NAME)
         .map { infos ->
-            // Сначала — то, что идёт сейчас, иначе последний завершённый.
-            val info = infos.firstOrNull { !it.state.isFinished } ?: infos.lastOrNull()
+            // Сначала — то, что идёт сейчас, иначе самый свежий из завершённых.
+            val info = infos.firstOrNull { !it.state.isFinished }
+                ?: infos.maxByOrNull { it.outputData.getLong(AnalysisWorker.KEY_FINISHED_AT, 0) }
             info?.let {
                 val data = if (it.state.isFinished) it.outputData else it.progress
                 val p = data.getFloat(AnalysisWorker.KEY_PROGRESS, -1f)

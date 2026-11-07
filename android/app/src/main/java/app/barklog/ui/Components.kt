@@ -242,3 +242,22 @@ fun BackChevron(color: Color, modifier: Modifier = Modifier) {
         drawLine(color, Offset(s * 0.3f, s * 0.5f), Offset(s * 0.62f, s * 0.8f), 1.5.dp.toPx(), StrokeCap.Round)
     }
 }
+
+/** «Играть» — треугольник, «стоп» — квадрат; линейный стиль, цвет текста. */
+@Composable
+fun PlayGlyph(playing: Boolean, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(16.dp)) {
+        val s = size.minDimension
+        if (playing) {
+            drawRect(color, Offset(s * 0.22f, s * 0.22f), Size(s * 0.56f, s * 0.56f))
+        } else {
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(s * 0.28f, s * 0.18f)
+                lineTo(s * 0.82f, s * 0.5f)
+                lineTo(s * 0.28f, s * 0.82f)
+                close()
+            }
+            drawPath(path, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx(), join = androidx.compose.ui.graphics.StrokeJoin.Round))
+        }
+    }
+}

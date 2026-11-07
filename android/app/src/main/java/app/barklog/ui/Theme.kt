@@ -10,9 +10,12 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import app.barklog.R
 import uniffi.barklog_ffi.SoundKind
 
 /** Токены из docs/DESIGN.md: нейтрали graphite, один акцент, цвета классов. */
@@ -96,16 +99,22 @@ data class Type(
     val monoLarge: TextStyle,
 )
 
-private val Mono = FontFamily.Monospace
+/** Golos Text — интерфейс (кириллица + табличные цифры), JetBrains Mono — время и цифры. */
+private fun variable(res: Int, weight: Int) =
+    Font(res, FontWeight(weight), variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
+
+private val Sans = FontFamily(variable(R.font.golos_text, 400), variable(R.font.golos_text, 500))
+private val Mono = FontFamily(variable(R.font.jetbrains_mono, 400), variable(R.font.jetbrains_mono, 500))
 private const val TNUM = "tnum"
 
 private fun type(p: Palette) = Type(
-    title = TextStyle(fontSize = 28.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium, color = p.text),
-    subtitle = TextStyle(fontSize = 16.sp, lineHeight = 24.sp, color = p.text2),
-    heading = TextStyle(fontSize = 15.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium, color = p.text),
-    body = TextStyle(fontSize = 15.sp, lineHeight = 22.sp, color = p.text),
-    caption = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, color = p.muted),
+    title = TextStyle(fontFamily = Sans, fontSize = 28.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium, color = p.text),
+    subtitle = TextStyle(fontFamily = Sans, fontSize = 16.sp, lineHeight = 24.sp, color = p.text2),
+    heading = TextStyle(fontFamily = Sans, fontSize = 15.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium, color = p.text),
+    body = TextStyle(fontFamily = Sans, fontSize = 15.sp, lineHeight = 22.sp, color = p.text),
+    caption = TextStyle(fontFamily = Sans, fontSize = 13.sp, lineHeight = 18.sp, color = p.muted),
     figure = TextStyle(
+        fontFamily = Sans,
         fontSize = 26.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium,
         fontFeatureSettings = TNUM, color = p.text,
     ),
@@ -139,6 +148,14 @@ fun BarkLogTheme(content: @Composable () -> Unit) {
         )
     }
     CompositionLocalProvider(LocalPalette provides p, LocalType provides type(p)) {
-        MaterialTheme(colorScheme = scheme, content = content)
+        val base = androidx.compose.material3.Typography()
+        val typography = androidx.compose.material3.Typography(
+            bodyLarge = base.bodyLarge.copy(fontFamily = Sans),
+            bodyMedium = base.bodyMedium.copy(fontFamily = Sans),
+            labelLarge = base.labelLarge.copy(fontFamily = Sans),
+            titleLarge = base.titleLarge.copy(fontFamily = Sans),
+            headlineSmall = base.headlineSmall.copy(fontFamily = Sans, fontWeight = FontWeight.Medium),
+        )
+        MaterialTheme(colorScheme = scheme, typography = typography, content = content)
     }
 }

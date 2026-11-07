@@ -33,6 +33,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import app.barklog.MainViewModel
+import android.net.Uri
+import androidx.compose.ui.graphics.Color
 import uniffi.barklog_ffi.EpisodeInfo
 import uniffi.barklog_ffi.SessionReport
 import uniffi.barklog_ffi.StartSource
@@ -247,6 +249,8 @@ private fun Hours(r: SessionReport) {
 @Composable
 private fun EpisodesPanel(r: SessionReport) {
     val c = Bark.colors
+    val player = rememberEpisodePlayer()
+    val uri = remember(r.sourceUri) { r.sourceUri?.let(Uri::parse) }
     Panel(Modifier.fillMaxWidth()) {
         PanelHeader(
             "Эпизоды",
@@ -256,9 +260,25 @@ private fun EpisodesPanel(r: SessionReport) {
             Text("За запись собака не подавала голос", style = Bark.type.caption)
             return@Panel
         }
+        val note = when {
+            player.error != null -> player.error
+            uri == null -> "Для этой записи прослушивание недоступно: у приложения нет постоянного " +
+                "доступа к файлу. Чтобы слушать фрагменты, добавьте файл кнопкой «Добавить запись»"
+            else -> null
+        }
+        if (note != null) {
+            Text(note, style = Bark.type.caption)
+            Spacer(Modifier.height(12.dp))
+        }
         r.episodes.take(MAX_EPISODES).forEachIndexed { i, e ->
             if (i > 0) HorizontalDivider(color = c.line, thickness = 1.dp)
-            EpisodeRow(e, r)
+            EpisodeRow(
+                e = e,
+                r = r,
+                playing = player.playing == i,
+                progress = if (player.playing == i) player.progress else 0f,
+                onClick = uri?.let { u -> { player.toggle(i, u, e.startMs.toLong(), e.endMs.toLong()) } },
+            )
         }
         if (r.episodes.size > MAX_EPISODES) {
             Spacer(Modifier.height(8.dp))
@@ -268,16 +288,46 @@ private fun EpisodesPanel(r: SessionReport) {
 }
 
 @Composable
-private fun EpisodeRow(e: EpisodeInfo, r: SessionReport) {
+private fun EpisodeRow(
+    e: EpisodeInfo,
+    r: SessionReport,
+    playing: Boolean,
+    progress: Float,
+    onClick: (() -> Unit)?,
+) {
     val c = Bark.colors
-    Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(Fmt.clock(r.startedAt, e.startMs.toLong()), style = Bark.type.mono, modifier = Modifier.widthIn(min = 72.dp))
-        Spacer(Modifier.width(8.dp))
-        Dot(c.of(e.kind))
-        Spacer(Modifier.width(8.dp))
-        Text(Fmt.label(e.kind), style = Bark.type.body, modifier = Modifier.weight(1f))
-        Box(contentAlignment = Alignment.CenterEnd) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (playing) c.raised else Color.Transparent)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+    ) {
+        Row(
+            Modifier.fillMaxSize().padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(Fmt.clock(r.startedAt, e.startMs.toLong()), style = Bark.type.mono, modifier = Modifier.widthIn(min = 72.dp))
+            Spacer(Modifier.width(8.dp))
+            Dot(c.of(e.kind))
+            Spacer(Modifier.width(8.dp))
+            Text(Fmt.label(e.kind), style = Bark.type.body, modifier = Modifier.weight(1f))
             Text(Fmt.duration((e.endMs - e.startMs).toLong()), style = Bark.type.mono)
+            if (onClick != null) {
+                Spacer(Modifier.width(12.dp))
+                PlayGlyph(playing, if (playing) c.text else c.text2)
+            }
+        }
+        if (playing) {
+            // Тонкая полоска прогресса по низу строки.
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth(progress)
+                    .height(2.dp)
+                    .background(c.of(e.kind)),
+            )
         }
     }
 }

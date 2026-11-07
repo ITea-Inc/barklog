@@ -62,10 +62,10 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 // Rust забирает дескриптор и закроет его сам.
                 val id = core.analyzeFd(
                     pfd.detachFd(),
-                    SourceFile(meta.name, meta.modifiedMs, offsetMin),
+                    SourceFile(meta.name, meta.modifiedMs, offsetMin, persistentUri(uri)),
                     listener,
                 )
-                Result.success(workDataOf(KEY_SESSION to id, KEY_NAME to meta.name))
+                Result.success(workDataOf(KEY_SESSION to id, KEY_NAME to meta.name, KEY_FINISHED_AT to System.currentTimeMillis()))
             } catch (e: BarkLogException.Cancelled) {
                 Result.failure()
             } catch (e: BarkLogException) {
@@ -74,6 +74,16 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
         deleteSharedCopy(uri)
         return result
+    }
+
+    /**
+     * Ссылку сохраняем, только если доступ к файлу постоянный (выбран через системный
+     * диалог) — по ней потом проигрываются эпизоды.
+     */
+    private fun persistentUri(uri: Uri): String? {
+        val persisted = applicationContext.contentResolver.persistedUriPermissions
+            .any { it.uri == uri && it.isReadPermission }
+        return uri.toString().takeIf { persisted }
     }
 
     /** Копию файла, присланного через «Поделиться», после анализа удаляем. */
@@ -85,7 +95,9 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
     }
 
     private fun failure(message: String, name: String? = null) =
-        Result.failure(workDataOf(KEY_ERROR to message, KEY_NAME to name))
+        Result.failure(
+            workDataOf(KEY_ERROR to message, KEY_NAME to name, KEY_FINISHED_AT to System.currentTimeMillis()),
+        )
 
     private fun displayName() = inputData.getString(KEY_NAME_HINT) ?: "запись"
 
@@ -134,6 +146,8 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         const val KEY_PROGRESS = "progress"
         const val KEY_SESSION = "session"
         const val KEY_ERROR = "error"
+        /** Порядок завершённых задач WorkManager не гарантирует — сортируем по этому полю. */
+        const val KEY_FINISHED_AT = "finished_at"
         private const val NOTIFICATION_ID = 1
     }
 }
