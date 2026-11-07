@@ -11,6 +11,8 @@ use crate::classify::{ClassScores, Thresholds, decide};
 const BATCH_PATCHES: usize = 64;
 /// Насколько быстро оценка фонового шума может расти, дБ на окно (≈ 6 дБ в минуту).
 const FLOOR_RISE_DB: f32 = 0.05;
+/// Шаг вызова колбэка прогресса.
+const PROGRESS_STEP_MS: u64 = 1_000;
 
 /// Итог по одному окну 0.96 с (шаг 0.48 с).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,17 +188,21 @@ pub fn analyze(
     }
     let total_ms = source.duration_ms();
     let mut buf = Vec::with_capacity(TARGET_RATE as usize * 4);
+    // Колбэк дёргаем не чаще раза в секунду звука: через FFI каждый вызов недёшев,
+    // а пакетов в многочасовой записи — больше миллиона.
+    let mut reported_ms = 0;
     loop {
         buf.clear();
         if !source.read(&mut buf)? {
             break;
         }
         analyzer.push(&buf);
-        if !progress(Progress {
-            processed_ms: analyzer.processed_ms(),
-            total_ms,
-        }) {
-            return Err(AnalyzeError::Cancelled);
+        let processed_ms = analyzer.processed_ms();
+        if processed_ms >= reported_ms + PROGRESS_STEP_MS {
+            reported_ms = processed_ms;
+            if !progress(Progress { processed_ms, total_ms }) {
+                return Err(AnalyzeError::Cancelled);
+            }
         }
     }
     Ok(analyzer.finish())
