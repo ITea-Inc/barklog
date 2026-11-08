@@ -21,6 +21,7 @@ import app.barklog.ui.LiveScreen
 import app.barklog.ui.RemoteScreen
 import app.barklog.ui.ReportScreen
 import app.barklog.ui.SessionsScreen
+import app.barklog.ui.SettingsScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -36,6 +37,7 @@ class MainActivity : ComponentActivity() {
                 var openId by rememberSaveable { mutableStateOf<Long?>(null) }
                 var showLive by rememberSaveable { mutableStateOf(false) }
                 var showRemote by rememberSaveable { mutableStateOf(false) }
+                var showSettings by rememberSaveable { mutableStateOf(false) }
                 val live by vm.live.collectAsStateWithLifecycle()
 
                 // Запись сохранена — сразу открываем её отчёт.
@@ -54,7 +56,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val id = openId
-                if (showRemote) {
+                if (showSettings) {
+                    BackHandler { showSettings = false }
+                    SettingsScreen(vm, onBack = { showSettings = false })
+                } else if (showRemote) {
                     BackHandler { showRemote = false }
                     RemoteScreen(vm, onBack = { showRemote = false })
                 } else if (showLive) {
@@ -66,6 +71,7 @@ class MainActivity : ComponentActivity() {
                         onOpen = { openId = it },
                         onOpenLive = { showLive = true },
                         onOpenRemote = { showRemote = true },
+                        onOpenSettings = { showSettings = true },
                     )
                 } else {
                     BackHandler { openId = null }

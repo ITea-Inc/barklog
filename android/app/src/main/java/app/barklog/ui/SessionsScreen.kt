@@ -59,6 +59,7 @@ fun SessionsScreen(
     onOpen: (Long) -> Unit,
     onOpenLive: () -> Unit,
     onOpenRemote: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val analysis by vm.analysis.collectAsStateWithLifecycle()
@@ -127,7 +128,8 @@ fun SessionsScreen(
     ) {
         item {
             Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("BarkLog", style = Bark.type.heading)
+                Text("BarkLog", style = Bark.type.heading, modifier = Modifier.weight(1f))
+                TextLink("Настройки", c.text2, onOpenSettings)
             }
             Spacer(Modifier.height(24.dp))
             Text("Записи", style = Bark.type.title)
@@ -325,7 +327,7 @@ private fun LiveState.isBusy() = this is LiveState.Starting || this is LiveState
 /** Главная кнопка: заливка цветом текста, 44 dp. Долгое нажатие — только для отладки. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PrimaryAction(text: String, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
+internal fun PrimaryAction(text: String, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
     val c = Bark.colors
     Box(
         Modifier
@@ -342,7 +344,7 @@ private fun PrimaryAction(text: String, onClick: () -> Unit, onLongClick: (() ->
 
 /** Второстепенная кнопка: приподнятая поверхность с волосяной рамкой. */
 @Composable
-private fun SecondaryAction(text: String, onClick: () -> Unit) {
+internal fun SecondaryAction(text: String, onClick: () -> Unit) {
     val c = Bark.colors
     Box(
         Modifier
@@ -447,7 +449,7 @@ private fun SessionRow(s: SessionSummary, onClick: () -> Unit) {
 
 /** Текстовая кнопка без минимальной высоты 48 dp у TextButton — она раздувала карточку снизу. */
 @Composable
-private fun TextLink(text: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
+internal fun TextLink(text: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
     Text(
         text,
         style = Bark.type.body.copy(color = color),

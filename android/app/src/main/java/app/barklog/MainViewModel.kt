@@ -30,6 +30,9 @@ import kotlinx.coroutines.withContext
 import uniffi.barklog_ffi.BarkLogException
 import uniffi.barklog_ffi.LabelKind
 import uniffi.barklog_ffi.PersonalStatus
+import uniffi.barklog_ffi.SensitivityLimits
+import uniffi.barklog_ffi.SensitivitySettings
+import uniffi.barklog_ffi.sensitivityLimits as coreSensitivityLimits
 import uniffi.barklog_ffi.SessionReport
 import uniffi.barklog_ffi.SessionSummary
 import java.util.UUID
@@ -139,8 +142,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _training = MutableStateFlow(false)
     val training: StateFlow<Boolean> = _training.asStateFlow()
 
+    /** Чувствительность: порог «это собака» и правила эпизодов. null — ещё загружается. */
+    private val _sensitivity = MutableStateFlow<SensitivitySettings?>(null)
+    val sensitivity: StateFlow<SensitivitySettings?> = _sensitivity.asStateFlow()
+
+    val sensitivityLimits: SensitivityLimits by lazy { coreSensitivityLimits() }
+
+    /** Идёт пересчёт записей после смены чувствительности. */
+    private val _applying = MutableStateFlow(false)
+    val applying: StateFlow<Boolean> = _applying.asStateFlow()
+
     init {
         refresh()
+        viewModelScope.launch {
+            runCatching {
+                val core = barkApp.core()
+                _sensitivity.value = withContext(Dispatchers.IO) { core.sensitivity() }
+            }
+        }
+    }
+
+    /** Сохраняет чувствительность и пересчитывает все записи. */
+    fun setSensitivity(settings: SensitivitySettings) {
+        viewModelScope.launch {
+            _applying.value = true
+            try {
+                val core = barkApp.core()
+                _sensitivity.value = withContext(Dispatchers.Default) { core.setSensitivity(settings) }
+                refresh()
+            } catch (e: BarkLogException) {
+                _error.value = e.cleanMessage()
+            } finally {
+                _applying.value = false
+            }
+        }
     }
 
     private fun refreshPersonal() {
