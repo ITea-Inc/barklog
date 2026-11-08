@@ -35,6 +35,8 @@ import uniffi.barklog_ffi.SensitivitySettings
 import uniffi.barklog_ffi.sensitivityLimits as coreSensitivityLimits
 import uniffi.barklog_ffi.SessionReport
 import uniffi.barklog_ffi.SessionSummary
+import uniffi.barklog_ffi.TrendBucket
+import uniffi.barklog_ffi.TrendPeriod
 import java.util.UUID
 
 /** Текущий анализ для карточки на главном экране. */
@@ -305,6 +307,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     } catch (e: BarkLogException) {
         _error.value = e.cleanMessage()
         Result.failure(e)
+    }
+
+    /** Записи по дням или неделям, от старых к новым; пустой список при ошибке. */
+    suspend fun trends(period: TrendPeriod): List<TrendBucket> = try {
+        val core = barkApp.core()
+        val offsetMin = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000
+        withContext(Dispatchers.IO) { core.trends(period, offsetMin) }
+    } catch (e: BarkLogException) {
+        _error.value = e.cleanMessage()
+        emptyList()
     }
 
     fun delete(id: Long) {

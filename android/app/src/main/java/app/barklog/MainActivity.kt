@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.barklog.ui.BarkLogTheme
+import app.barklog.ui.HistoryScreen
 import app.barklog.ui.LiveScreen
 import app.barklog.ui.RemoteScreen
 import app.barklog.ui.ReportScreen
@@ -38,6 +39,7 @@ class MainActivity : ComponentActivity() {
                 var showLive by rememberSaveable { mutableStateOf(false) }
                 var showRemote by rememberSaveable { mutableStateOf(false) }
                 var showSettings by rememberSaveable { mutableStateOf(false) }
+                var showHistory by rememberSaveable { mutableStateOf(false) }
                 val live by vm.live.collectAsStateWithLifecycle()
 
                 // Запись сохранена — сразу открываем её отчёт.
@@ -65,6 +67,9 @@ class MainActivity : ComponentActivity() {
                 } else if (showLive) {
                     BackHandler { showLive = false }
                     LiveScreen(live, onBack = { showLive = false }, onStop = vm::stopRecording)
+                } else if (id == null && showHistory) {
+                    BackHandler { showHistory = false }
+                    HistoryScreen(vm, onBack = { showHistory = false }, onOpen = { openId = it })
                 } else if (id == null) {
                     SessionsScreen(
                         vm,
@@ -72,6 +77,7 @@ class MainActivity : ComponentActivity() {
                         onOpenLive = { showLive = true },
                         onOpenRemote = { showRemote = true },
                         onOpenSettings = { showSettings = true },
+                        onOpenHistory = { showHistory = true },
                     )
                 } else {
                     BackHandler { openId = null }

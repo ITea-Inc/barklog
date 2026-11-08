@@ -51,6 +51,8 @@ import androidx.compose.ui.platform.LocalContext
 import uniffi.barklog_ffi.SessionSummary
 import app.barklog.remote.RemoteLive
 import uniffi.barklog_ffi.PersonalStatus
+import uniffi.barklog_ffi.TrendBucket
+import uniffi.barklog_ffi.TrendPeriod
 import kotlin.math.roundToInt
 
 @Composable
@@ -60,6 +62,7 @@ fun SessionsScreen(
     onOpenLive: () -> Unit,
     onOpenRemote: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenHistory: () -> Unit,
 ) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val analysis by vm.analysis.collectAsStateWithLifecycle()
@@ -210,6 +213,14 @@ fun SessionsScreen(
             }
         }
 
+        // Динамика имеет смысл, когда есть с чем сравнивать.
+        if ((sessions?.size ?: 0) >= 2) {
+            item {
+                Spacer(Modifier.height(24.dp))
+                TrendsPanel(vm, onOpen = onOpenHistory)
+            }
+        }
+
         // Подстройка показывается, когда есть что размечать.
         if (!sessions.isNullOrEmpty()) {
             personal?.let { p ->
@@ -260,6 +271,34 @@ private fun RemoteCard(r: RemoteLive, onClick: () -> Unit) {
         Text(status, style = Bark.type.caption)
         Spacer(Modifier.height(12.dp))
         Text("Открыть", style = Bark.type.body)
+    }
+}
+
+/** Превью динамики: последние недели и сравнение с прошлой. */
+@Composable
+private fun TrendsPanel(vm: MainViewModel, onOpen: () -> Unit) {
+    val sessions by vm.sessions.collectAsStateWithLifecycle()
+    var weeks by remember { mutableStateOf<List<TrendBucket>>(emptyList()) }
+    LaunchedEffect(sessions) { weeks = vm.trends(TrendPeriod.WEEK).takeLast(8) }
+    Panel(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onOpen)) {
+        Text("Динамика", style = Bark.type.heading)
+        Spacer(Modifier.height(4.dp))
+        val last = weeks.lastOrNull()
+        val prev = weeks.getOrNull(weeks.size - 2)
+        val text = when {
+            last == null -> "Считаю"
+            prev == null -> "Голос собаки на этой неделе — ${Fmt.percent(last.dogPercent)} времени записи. " +
+                "Сравнение появится, когда будут записи за несколько недель"
+            else -> "Голос собаки в неделю с ${Fmt.day(last.day.toInt(), last.month.toInt())} — " +
+                "${Fmt.percent(last.dogPercent)} времени записи, неделей раньше — ${Fmt.percent(prev.dogPercent)}"
+        }
+        Text(text, style = Bark.type.caption)
+        if (weeks.size >= 2) {
+            Spacer(Modifier.height(16.dp))
+            TrendChart(weeks, selected = null, onSelect = { onOpen() }, height = 72.dp)
+        }
+        Spacer(Modifier.height(12.dp))
+        Text("Подробнее", style = Bark.type.body)
     }
 }
 

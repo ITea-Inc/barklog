@@ -233,6 +233,30 @@ impl From<SensitivitySettings> for Sensitivity {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TrendPeriod {
+    Day,
+    /// Неделя с понедельника.
+    Week,
+}
+
+/// Записи за день или неделю.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TrendBucket {
+    /// Первый день периода (для недели — понедельник).
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub sessions: u32,
+    pub duration_ms: u64,
+    pub dog_ms: u64,
+    /// Лай, скулёж, вой, рычание.
+    pub dog_class_ms: Vec<u64>,
+    pub episodes: u32,
+    /// Доля голоса собаки от времени записи, %.
+    pub dog_percent: f32,
+}
+
 /// Значения по умолчанию и допустимые пределы — для ползунков настроек.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct SensitivityLimits {
@@ -672,6 +696,49 @@ impl BarkLog {
             return Err(BarkLogError::NotFound);
         }
         Ok(note)
+    }
+
+    /// Записи по дням или неделям, от старых к новым. `utc_offset_min` — для записей
+    /// с неизвестным началом: их день считается по времени добавления в этом поясе.
+    pub fn trends(&self, period: TrendPeriod, utc_offset_min: i32) -> Result<Vec<TrendBucket>> {
+        let sessions: Vec<core::TrendSession> = self
+            .store
+            .lock()
+            .unwrap()
+            .list()?
+            .into_iter()
+            .map(|s| {
+                let (start, offset) = match s.started_at {
+                    Some(st) => (st.unix_ms, st.utc_offset_min),
+                    None => (s.created_at_ms, utc_offset_min),
+                };
+                core::TrendSession {
+                    start_unix_ms: start,
+                    utc_offset_min: offset,
+                    duration_ms: s.duration_ms,
+                    dog_class_ms: [s.bark_ms, s.whine_ms, s.howl_ms, s.growl_ms],
+                    episodes: s.episodes,
+                }
+            })
+            .collect();
+        let period = match period {
+            TrendPeriod::Day => core::TrendPeriod::Day,
+            TrendPeriod::Week => core::TrendPeriod::Week,
+        };
+        Ok(core::trends(&sessions, period)
+            .into_iter()
+            .map(|b| TrendBucket {
+                year: b.first_day.year,
+                month: b.first_day.month,
+                day: b.first_day.day,
+                sessions: b.sessions,
+                duration_ms: b.duration_ms,
+                dog_ms: b.dog_ms,
+                dog_class_ms: b.dog_class_ms.to_vec(),
+                episodes: b.episodes,
+                dog_percent: b.dog_percent,
+            })
+            .collect())
     }
 
     pub fn sensitivity(&self) -> SensitivitySettings {
@@ -1164,6 +1231,10 @@ mod tests {
             bl.set_note(id + 100, "x".into()),
             Err(BarkLogError::NotFound)
         ));
+        let weeks = bl.trends(TrendPeriod::Week, 180).unwrap();
+        assert_eq!(weeks.len(), 1);
+        assert_eq!(weeks[0].sessions, 1);
+        assert_eq!(weeks[0].dog_ms, before.dog_ms);
         assert_eq!(before.dog_ms, n * 480);
 
         // Одинаковые звуки с разными ответами — модель не различает их и не сохраняется.

@@ -66,6 +66,26 @@ object Fmt {
     fun isCurrentYear(start: StartInfo): Boolean =
         local(start, 0).year == OffsetDateTime.now().year
 
+    /** «2 ноября», с годом — «2 ноября 2025». */
+    fun day(day: Int, month: Int, year: Int? = null): String =
+        "$day ${MONTHS[month - 1]}" + (year?.let { " $it" } ?: "")
+
+    /** «2.11» — подпись под столбцом. */
+    fun dayShort(day: Int, month: Int): String = String.format(Locale.ROOT, "%d.%02d", day, month)
+
+    /** 1 запись, 3 записи, 12 записей. */
+    fun records(n: Int): String {
+        val mod100 = n % 100
+        val mod10 = n % 10
+        val word = when {
+            mod100 in 11..14 -> "записей"
+            mod10 == 1 -> "запись"
+            mod10 in 2..4 -> "записи"
+            else -> "записей"
+        }
+        return "$n $word"
+    }
+
     /** 1 эпизод, 3 эпизода, 12 эпизодов. */
     fun episodes(n: Int): String {
         val mod100 = n % 100

@@ -10,6 +10,7 @@ pub mod pipeline;
 pub mod report;
 pub mod settings;
 pub mod start;
+pub mod trends;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,7 @@ pub use pipeline::{Analysis, AnalyzeError, Progress, StreamAnalyzer, WindowResul
 pub use report::{Episode, Report, ReportSettings, StartTime, Stats, build_report};
 pub use settings::Sensitivity;
 pub use start::{StartSource, start_from_modified, start_from_name};
+pub use trends::{Date, TrendBucket, TrendPeriod, TrendSession, trends};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
