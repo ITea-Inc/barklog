@@ -182,10 +182,13 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
         }
         let patches = std::mem::take(&mut self.pending);
 
-        let mut gated = vec![false; patches.len()];
-        for (g, p) in gated.iter_mut().zip(&patches) {
-            *g = self.use_gate && self.is_quiet(p.rms_db);
-        }
+        let (gated, near_floor): (Vec<bool>, Vec<bool>) = patches
+            .iter()
+            .map(|p| {
+                let (gate, quiet) = self.level(p.rms_db);
+                (self.use_gate && gate, quiet)
+            })
+            .unzip();
         let to_run: Vec<Patch> = patches
             .iter()
             .zip(&gated)
@@ -194,7 +197,7 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
             .collect();
         let mut predictions = self.model.borrow().predict(&to_run).into_iter();
 
-        for (p, g) in patches.iter().zip(gated) {
+        for ((p, g), quiet) in patches.iter().zip(gated).zip(near_floor) {
             let (class, confidence, scores) = if g {
                 self.gated += 1;
                 (SoundClass::Silence, 1.0, ClassScores::default())
@@ -205,6 +208,12 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
                 let (class, conf) = match &self.personal {
                     Some(m) if candidate => m.decide(&pred.embedding),
                     _ => decide(&scores, &self.thresholds),
+                };
+                // Громкий фон (шумный диктофон) проходит гейт, но без собаки это та же тишина.
+                let (class, conf) = if class == SoundClass::Other && quiet {
+                    (SoundClass::Silence, conf)
+                } else {
+                    (class, conf)
                 };
                 if (candidate || class.is_dog()) && self.embeddings.len() < MAX_EMBEDDINGS {
                     let index = self.windows.len() as u32;
@@ -224,17 +233,20 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
         }
     }
 
-    /// Обновляет оценку фонового шума и решает, тихое ли окно.
+    /// Обновляет оценку фонового шума и возвращает (отсеять ли окно гейтом, на уровне ли оно фона).
     /// Оценка быстро падает к тихим окнам и медленно растёт, поэтому лай её не «поднимает».
-    /// Громкие окна не отсеиваются никогда — иначе запись, начавшаяся с лая, стала бы «фоном».
-    fn is_quiet(&mut self, rms_db: f32) -> bool {
+    /// Громкие окна гейтом не отсеиваются никогда — иначе запись, начавшаяся с лая, стала бы
+    /// «фоном»; такие окна идут в сеть, и только если собаки в них нет, считаются тишиной.
+    fn level(&mut self, rms_db: f32) -> (bool, bool) {
         let floor = match self.noise_floor_db {
             None => rms_db,
             Some(f) => rms_db.min(f + FLOOR_RISE_DB),
         };
         self.noise_floor_db = Some(floor);
         let th = &self.thresholds;
-        rms_db < th.silence_db || (rms_db < th.quiet_max_db && rms_db < floor + th.gate_margin_db)
+        let near_floor = rms_db < floor + th.gate_margin_db;
+        let gate = rms_db < th.silence_db || (rms_db < th.quiet_max_db && near_floor);
+        (gate, near_floor || rms_db < th.silence_db)
     }
 }
 
