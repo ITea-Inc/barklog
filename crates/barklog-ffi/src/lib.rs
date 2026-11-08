@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use barklog_audio::{AudioSource, FileSource};
 use barklog_core as core;
-use barklog_core::{
-    AnalyzeError, LiveRecorder, PersonalModel, ReportSettings, Thresholds, analyze, build_report,
-};
+use barklog_core::{AnalyzeError, LiveRecorder, PersonalModel, Sensitivity, analyze, build_report};
 use barklog_ml::Yamnet;
 use barklog_store::Store;
 
@@ -203,6 +201,58 @@ pub struct PersonalStatus {
     pub min_samples: u32,
 }
 
+/// Чувствительность: порог «это собака» и правила сборки эпизодов.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct SensitivitySettings {
+    /// 0–1, меньше — чувствительнее (больше звуков считается собакой).
+    pub dog_min: f32,
+    /// Паузы короче этого не разрывают эпизод.
+    pub merge_gap_ms: u64,
+    /// Эпизоды короче этого не считаются.
+    pub min_episode_ms: u64,
+}
+
+impl From<Sensitivity> for SensitivitySettings {
+    fn from(s: Sensitivity) -> Self {
+        Self {
+            dog_min: s.dog_min,
+            merge_gap_ms: s.merge_gap_ms,
+            min_episode_ms: s.min_episode_ms,
+        }
+    }
+}
+
+impl From<SensitivitySettings> for Sensitivity {
+    fn from(s: SensitivitySettings) -> Self {
+        Self {
+            dog_min: s.dog_min,
+            merge_gap_ms: s.merge_gap_ms,
+            min_episode_ms: s.min_episode_ms,
+        }
+    }
+}
+
+/// Значения по умолчанию и допустимые пределы — для ползунков настроек.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct SensitivityLimits {
+    pub defaults: SensitivitySettings,
+    pub dog_min_low: f32,
+    pub dog_min_high: f32,
+    pub max_merge_gap_ms: u64,
+    pub max_min_episode_ms: u64,
+}
+
+#[uniffi::export]
+pub fn sensitivity_limits() -> SensitivityLimits {
+    SensitivityLimits {
+        defaults: Sensitivity::default().into(),
+        dog_min_low: Sensitivity::DOG_MIN.0,
+        dog_min_high: Sensitivity::DOG_MIN.1,
+        max_merge_gap_ms: Sensitivity::MAX_GAP_MS,
+        max_min_episode_ms: Sensitivity::MAX_MIN_EPISODE_MS,
+    }
+}
+
 /// Время по классам — в порядке `SoundKind` (лай, скулёж, вой, рычание, прочее, тишина).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct TimeBucket {
@@ -336,9 +386,11 @@ pub struct BarkLog {
     model: Arc<Yamnet>,
     store: Arc<Mutex<Store>>,
     personal: RwLock<Option<Arc<PersonalModel>>>,
+    sensitivity: RwLock<Sensitivity>,
 }
 
 const PERSONAL_MODEL: &str = "personal";
+const SENSITIVITY: &str = "sensitivity";
 /// Ниже этой точности на отложенной выборке модель не применяем.
 const MIN_PERSONAL_ACCURACY: f32 = 0.6;
 
@@ -357,10 +409,16 @@ impl BarkLog {
             .and_then(|(json, _)| serde_json::from_str::<PersonalModel>(&json).ok())
             .filter(|m| m.version == PersonalModel::VERSION)
             .map(Arc::new);
+        let sensitivity = store
+            .load_setting(SENSITIVITY)?
+            .and_then(|json| serde_json::from_str::<Sensitivity>(&json).ok())
+            .unwrap_or_default()
+            .clamped();
         Ok(Arc::new(Self {
             model: Arc::new(model),
             store: Arc::new(Mutex::new(store)),
             personal: RwLock::new(personal),
+            sensitivity: RwLock::new(sensitivity),
         }))
     }
 
@@ -463,7 +521,7 @@ impl BarkLog {
         let dir = Path::new(&clips_root).join(format!("live-{now}"));
         let recorder = LiveRecorder::new(
             self.model.clone(),
-            core::Sensitivity::default(),
+            self.current_sensitivity(),
             input_rate,
             started_at,
             &dir,
@@ -597,6 +655,26 @@ impl BarkLog {
     pub fn delete_session(&self, id: i64) -> Result<bool> {
         Ok(self.store.lock().unwrap().delete(id)?)
     }
+
+    pub fn sensitivity(&self) -> SensitivitySettings {
+        self.current_sensitivity().into()
+    }
+
+    /// Сохраняет чувствительность и пересчитывает ею все записи (без повторного анализа).
+    /// Значения вне пределов подрезаются; возвращаются фактически применённые.
+    pub fn set_sensitivity(&self, settings: SensitivitySettings) -> Result<SensitivitySettings> {
+        let s = Sensitivity::from(settings).clamped();
+        let json = serde_json::to_string(&s).map_err(|e| BarkLogError::Storage {
+            reason: e.to_string(),
+        })?;
+        self.store
+            .lock()
+            .unwrap()
+            .save_setting(SENSITIVITY, &json)?;
+        *self.sensitivity.write().unwrap() = s;
+        self.recompute_all()?;
+        Ok(s.into())
+    }
 }
 
 impl BarkLog {
@@ -604,7 +682,11 @@ impl BarkLog {
         self.personal.read().unwrap().clone()
     }
 
-    /// Пересчитывает отчёт сессии по сохранённым окнам, личной модели и отметкам.
+    fn current_sensitivity(&self) -> Sensitivity {
+        *self.sensitivity.read().unwrap()
+    }
+
+    /// Пересчитывает отчёт сессии по сохранённым окнам, чувствительности, личной модели и отметкам.
     fn recompute(&self, id: i64) -> Result<()> {
         let store = self.store.lock().unwrap();
         let Some(mut analysis) = store.analysis(id)? else {
@@ -613,7 +695,8 @@ impl BarkLog {
         let old = store.get(id)?.ok_or(BarkLogError::NotFound)?;
         let labels = store.labels(id)?;
         let personal = self.personal();
-        let thresholds = Thresholds::default();
+        let sensitivity = self.current_sensitivity();
+        let thresholds = sensitivity.thresholds();
         let with = core::compact::Reclassify {
             yamnet: Some(&self.model),
             thresholds: &thresholds,
@@ -621,7 +704,8 @@ impl BarkLog {
             personal: personal.as_deref(),
         };
         core::compact::reclassify(&mut analysis, &with, &labels);
-        let report = build_report(&analysis, &old.settings, old.started_at, old.source);
+        let settings = sensitivity.apply(&old.settings);
+        let report = build_report(&analysis, &settings, old.started_at, old.source);
         store.update_report(id, &report)?;
         Ok(())
     }
@@ -647,10 +731,11 @@ impl BarkLog {
         let mut source = FileSource::from_file(f, ext.as_deref())?;
 
         let personal = self.personal();
+        let sensitivity = self.current_sensitivity();
         let analysis = analyze(
             &mut source,
             &self.model,
-            Thresholds::default(),
+            sensitivity.thresholds(),
             true,
             personal,
             |p| listener.on_progress(p.processed_ms, p.total_ms),
@@ -670,7 +755,7 @@ impl BarkLog {
         });
         let report = build_report(
             &analysis,
-            &ReportSettings::for_duration(analysis.duration_ms),
+            &sensitivity.report_settings(analysis.duration_ms),
             started_at,
             Some(file.display_name.clone()),
         );
@@ -786,11 +871,12 @@ impl LiveSession {
             .take()
             .ok_or(BarkLogError::NotFound)?;
         let started_at = rec.started_at();
+        let sensitivity = rec.sensitivity();
         let dir = rec.clips_dir().to_string_lossy().into_owned();
         let (analysis, _) = rec.finish().map_err(storage_error)?;
         let report = build_report(
             &analysis,
-            &ReportSettings::for_duration(analysis.duration_ms),
+            &sensitivity.report_settings(analysis.duration_ms),
             Some(started_at),
             Some("Запись в приложении".into()),
         );
@@ -870,6 +956,7 @@ impl PcmFileReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use barklog_core::ReportSettings;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     struct Counter(AtomicU32, bool);
@@ -1103,6 +1190,94 @@ mod tests {
             n * 480,
             "без модели и отметок — как было"
         );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn sensitivity_recomputes_reports_and_persists() {
+        use barklog_core::{Analysis, ClassScores, SoundClass, WindowResult};
+        let Some(model) = model_path() else { return };
+        let db = std::env::temp_dir().join(format!("barklog-ffi-sens-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let bl = BarkLog::new(db.to_string_lossy().into_owned(), model.clone()).unwrap();
+        assert_eq!(bl.sensitivity(), sensitivity_limits().defaults);
+
+        // Одиночный уверенный гав, пауза, и длинный лай с вероятностью «собака» 0,4.
+        let pattern = "b..............bbbbbbbb";
+        let windows: Vec<WindowResult> = pattern
+            .chars()
+            .enumerate()
+            .map(|(i, c)| WindowResult {
+                start_ms: i as u64 * 480,
+                class: if c == 'b' {
+                    SoundClass::Bark
+                } else {
+                    SoundClass::Silence
+                },
+                confidence: if i == 0 { 0.9 } else { 0.4 },
+                rms_db: if c == 'b' { -20.0 } else { -60.0 },
+                peak_db: -10.0,
+                gated: c != 'b',
+                scores: ClassScores::default(),
+            })
+            .collect();
+        let analysis = Analysis {
+            duration_ms: pattern.len() as u64 * 480,
+            windows,
+            embeddings: Vec::new(),
+        };
+        let report = build_report(
+            &analysis,
+            &ReportSettings::default(),
+            None,
+            Some("t".into()),
+        );
+        let id = bl
+            .store
+            .lock()
+            .unwrap()
+            .insert(&report, 1, None, Some(&analysis))
+            .unwrap();
+        assert_eq!(bl.get_report(id).unwrap().episodes_count, 2);
+
+        let applied = bl
+            .set_sensitivity(SensitivitySettings {
+                min_episode_ms: 1_000,
+                ..bl.sensitivity()
+            })
+            .unwrap();
+        assert_eq!(applied.min_episode_ms, 1_000);
+        let r = bl.get_report(id).unwrap();
+        assert_eq!(
+            r.episodes_count, 1,
+            "одиночный гав короче секунды не считается"
+        );
+        assert_eq!(r.dog_ms, 8 * 480);
+
+        // Порог выше уверенности длинного лая — остаётся только гав, но он короткий.
+        bl.set_sensitivity(SensitivitySettings {
+            dog_min: 0.5,
+            min_episode_ms: 0,
+            ..applied
+        })
+        .unwrap();
+        let r = bl.get_report(id).unwrap();
+        assert_eq!(r.episodes_count, 1);
+        assert_eq!(r.dog_ms, 480);
+
+        // Вне пределов — подрезается; настройка переживает перезапуск.
+        let clamped = bl
+            .set_sensitivity(SensitivitySettings {
+                dog_min: 0.0,
+                merge_gap_ms: 3_000,
+                min_episode_ms: 0,
+            })
+            .unwrap();
+        assert_eq!(clamped.dog_min, sensitivity_limits().dog_min_low);
+        drop(bl);
+        let bl = BarkLog::new(db.to_string_lossy().into_owned(), model).unwrap();
+        assert_eq!(bl.sensitivity(), clamped);
+        drop(bl);
         let _ = std::fs::remove_file(&db);
     }
 }

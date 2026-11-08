@@ -88,6 +88,11 @@ const MIGRATIONS: &[&str] = &[
         data           TEXT    NOT NULL,
         trained_at_ms  INTEGER NOT NULL
     );",
+    // 4: настройки пользователя (JSON по имени).
+    "CREATE TABLE settings (
+        name  TEXT PRIMARY KEY,
+        data  TEXT NOT NULL
+    );",
 ];
 
 pub struct Store {
@@ -384,6 +389,24 @@ impl Store {
             .execute("DELETE FROM models WHERE name = ?1", [name])?;
         Ok(())
     }
+
+    pub fn save_setting(&self, name: &str, json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (name, data) VALUES (?1, ?2)
+             ON CONFLICT (name) DO UPDATE SET data = ?2",
+            params![name, json],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_setting(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT data FROM settings WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
 }
 
 fn f16_bytes(v: &[f16]) -> Vec<u8> {
@@ -546,6 +569,16 @@ mod tests {
         );
         store.delete_model("personal").unwrap();
         assert_eq!(store.load_model("personal").unwrap(), None);
+
+        assert_eq!(store.load_setting("sensitivity").unwrap(), None);
+        store.save_setting("sensitivity", "{}").unwrap();
+        store
+            .save_setting("sensitivity", "{\"dog_min\":0.3}")
+            .unwrap();
+        assert_eq!(
+            store.load_setting("sensitivity").unwrap().as_deref(),
+            Some("{\"dog_min\":0.3}")
+        );
 
         assert!(store.delete(id).unwrap());
         assert!(store.analysis(id).unwrap().is_none());
