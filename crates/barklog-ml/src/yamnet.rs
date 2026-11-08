@@ -193,12 +193,34 @@ impl Yamnet {
             }
             emb.iter_mut().for_each(|e| *e /= hw as f32);
         }
+        let scores = self.head(&embeddings, n);
+        (0..n)
+            .map(|b| Prediction {
+                scores: scores[b * NUM_CLASSES..(b + 1) * NUM_CLASSES].into(),
+                embedding: embeddings[b * EMBEDDING_SIZE..(b + 1) * EMBEDDING_SIZE].into(),
+            })
+            .collect()
+    }
+
+    /// Вероятности AudioSet по готовым эмбеддингам `[n][EMBEDDING_SIZE]` — без свёрточной
+    /// части сети; результат `[n][NUM_CLASSES]`. Нужно, чтобы пересчитать сохранённые
+    /// окна с другими порогами.
+    pub fn scores_from_embeddings(&self, embeddings: &[f32]) -> Vec<f32> {
+        assert_eq!(embeddings.len() % EMBEDDING_SIZE, 0);
+        embeddings
+            .par_chunks(BATCH * EMBEDDING_SIZE)
+            .flat_map_iter(|chunk| self.head(chunk, chunk.len() / EMBEDDING_SIZE))
+            .collect()
+    }
+
+    /// Dense + sigmoid: `[n][EMBEDDING_SIZE]` → `[n][NUM_CLASSES]`.
+    fn head(&self, embeddings: &[f32], n: usize) -> Vec<f32> {
         let mut logits = vec![0f32; n * NUM_CLASSES];
         for b in 0..n {
             logits[b * NUM_CLASSES..(b + 1) * NUM_CLASSES].copy_from_slice(&self.logits_b);
         }
         gemm(
-            &embeddings,
+            embeddings,
             &self.logits_w,
             &mut logits,
             n,
@@ -206,16 +228,10 @@ impl Yamnet {
             NUM_CLASSES,
             1.0,
         );
-
-        (0..n)
-            .map(|b| Prediction {
-                scores: logits[b * NUM_CLASSES..(b + 1) * NUM_CLASSES]
-                    .iter()
-                    .map(|&z| 1.0 / (1.0 + (-z).exp()))
-                    .collect(),
-                embedding: embeddings[b * EMBEDDING_SIZE..(b + 1) * EMBEDDING_SIZE].into(),
-            })
-            .collect()
+        logits
+            .iter_mut()
+            .for_each(|z| *z = 1.0 / (1.0 + (-*z).exp()));
+        logits
     }
 }
 

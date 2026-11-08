@@ -463,7 +463,7 @@ impl BarkLog {
         let dir = Path::new(&clips_root).join(format!("live-{now}"));
         let recorder = LiveRecorder::new(
             self.model.clone(),
-            Thresholds::default(),
+            core::Sensitivity::default(),
             input_rate,
             started_at,
             &dir,
@@ -612,7 +612,15 @@ impl BarkLog {
         };
         let old = store.get(id)?.ok_or(BarkLogError::NotFound)?;
         let labels = store.labels(id)?;
-        core::compact::reclassify(&mut analysis, self.personal().as_deref(), &labels);
+        let personal = self.personal();
+        let thresholds = Thresholds::default();
+        let with = core::compact::Reclassify {
+            yamnet: Some(&self.model),
+            thresholds: &thresholds,
+            analyzed_dog_min: old.settings.windows_dog_min,
+            personal: personal.as_deref(),
+        };
+        core::compact::reclassify(&mut analysis, &with, &labels);
         let report = build_report(&analysis, &old.settings, old.started_at, old.source);
         store.update_report(id, &report)?;
         Ok(())

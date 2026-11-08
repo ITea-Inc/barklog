@@ -7,6 +7,7 @@ pub mod live;
 pub mod personal;
 pub mod pipeline;
 pub mod report;
+pub mod settings;
 pub mod start;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ pub use live::{ActiveBout, LiveRecorder, LiveSnapshot, SYNC_FORMAT, SyncError};
 pub use personal::{Label, PersonalModel, TrainError};
 pub use pipeline::{Analysis, AnalyzeError, Progress, StreamAnalyzer, WindowResult, analyze};
 pub use report::{Episode, Report, ReportSettings, StartTime, Stats, build_report};
+pub use settings::Sensitivity;
 pub use start::{StartSource, start_from_modified, start_from_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

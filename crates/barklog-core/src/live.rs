@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::clips::{ClipIndex, ClipWriter};
 use crate::pipeline::{Analysis, StreamAnalyzer};
-use crate::report::{Report, ReportSettings, StartTime, build_report};
-use crate::{SoundClass, Thresholds};
+use crate::report::{Report, StartTime, build_report};
+use crate::{Sensitivity, SoundClass};
 
 /// Окна по 0,48 с: сеть запускается примерно раз в 4 секунды.
 const LIVE_BATCH: usize = 8;
@@ -103,6 +103,7 @@ pub struct LiveRecorder<M: Borrow<Yamnet>> {
     input_samples: u64,
     clips: ClipWriter,
     started_at: StartTime,
+    sensitivity: Sensitivity,
     resampled: Vec<f32>,
     /// Сколько окон уже просмотрено на предмет сохранения звука.
     seen_windows: usize,
@@ -113,18 +114,19 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
     /// `input_rate` — частота микрофона; `clips_dir` — куда писать фрагменты звука.
     pub fn new(
         model: M,
-        thresholds: Thresholds,
+        sensitivity: Sensitivity,
         input_rate: u32,
         started_at: StartTime,
         clips_dir: impl AsRef<Path>,
     ) -> std::io::Result<Self> {
         Ok(Self {
-            analyzer: StreamAnalyzer::new(model, thresholds).with_batch(LIVE_BATCH),
+            analyzer: StreamAnalyzer::new(model, sensitivity.thresholds()).with_batch(LIVE_BATCH),
             resampler: Resampler::new(input_rate, TARGET_RATE),
             input_rate,
             input_samples: 0,
             clips: ClipWriter::create(clips_dir)?,
             started_at,
+            sensitivity,
             resampled: Vec::new(),
             seen_windows: 0,
             last_index_save_ms: 0,
@@ -139,6 +141,10 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
 
     pub fn started_at(&self) -> StartTime {
         self.started_at
+    }
+
+    pub fn sensitivity(&self) -> Sensitivity {
+        self.sensitivity
     }
 
     pub fn clips_dir(&self) -> &Path {
@@ -191,7 +197,7 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
         let analysis = self.analyzer.snapshot();
         let report = build_report(
             &analysis,
-            &ReportSettings::for_duration(analysis.duration_ms),
+            &self.sensitivity.report_settings(analysis.duration_ms),
             Some(self.started_at),
             None,
         );
@@ -276,7 +282,7 @@ mod tests {
             source: StartSource::Recorded,
         };
         let mut rec =
-            LiveRecorder::new(&model, Thresholds::default(), 48_000, start, &dir).unwrap();
+            LiveRecorder::new(&model, Sensitivity::default(), 48_000, start, &dir).unwrap();
 
         // 20 секунд тишины с микрофона 48 кГц порциями по 100 мс.
         let chunk = vec![0u8; 4800 * 2];

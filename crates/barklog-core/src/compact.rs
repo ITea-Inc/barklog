@@ -7,10 +7,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::SoundClass;
-use crate::classify::ClassScores;
+use crate::classify::{ClassScores, Thresholds, decide};
 use crate::personal::{Label, PersonalModel};
-use crate::pipeline::{Analysis, WindowResult};
-use barklog_ml::PATCH_HOP_MS;
+use crate::pipeline::{Analysis, NoiseFloor, WindowResult, background_as_silence};
+use barklog_ml::{PATCH_HOP_MS, Yamnet};
 
 const GATED: u8 = 0x80;
 
@@ -63,15 +63,75 @@ impl EpisodeLabel {
     }
 }
 
-/// Пересчитывает классы окон: сначала личной моделью (по сохранённым эмбеддингам),
-/// потом поверх — явные ответы пользователя. Ответы всегда главнее модели.
-pub fn reclassify(analysis: &mut Analysis, model: Option<&PersonalModel>, labels: &[EpisodeLabel]) {
-    if let Some(model) = model {
-        for (idx, emb) in &analysis.embeddings {
-            if let Some(w) = analysis.windows.get_mut(*idx as usize) {
-                let (class, conf) = model.decide(&crate::personal::to_f32(emb));
-                w.class = class;
-                w.confidence = conf;
+/// Чем пересчитывать окна сохранённой записи.
+pub struct Reclassify<'a> {
+    /// YAMNet: по эмбеддингу заново считает вероятности и решает с `thresholds`.
+    pub yamnet: Option<&'a Yamnet>,
+    pub thresholds: &'a Thresholds,
+    /// Порог, с которым окна решены при анализе: при том же пороге YAMNet не нужен.
+    pub analyzed_dog_min: f32,
+    pub personal: Option<&'a PersonalModel>,
+}
+
+/// Пересчитывает классы окон: окна с эмбеддингами — личной моделью или YAMNet с
+/// текущими порогами, остальные собачьи окна — по сохранённой уверенности; потом
+/// поверх — явные ответы пользователя. Ответы всегда главнее модели.
+///
+/// Эмбеддинги есть у всех окон, где YAMNet хоть немного слышал собаку
+/// (см. [`crate::pipeline::CANDIDATE_DOG`]), пока не кончился лимит на сессию.
+pub fn reclassify(analysis: &mut Analysis, with: &Reclassify, labels: &[EpisodeLabel]) {
+    // Та же оценка фона, что и при анализе: по ней «не собака» становится тишиной.
+    let mut floor = NoiseFloor::default();
+    let quiet: Vec<bool> = analysis
+        .windows
+        .iter()
+        .map(|w| floor.level(w.rms_db, with.thresholds).1)
+        .collect();
+    let yamnet = with
+        .yamnet
+        .filter(|_| (with.thresholds.dog_min - with.analyzed_dog_min).abs() > 1e-4);
+    let mut has_embedding = vec![false; analysis.windows.len()];
+    for (idx, _) in &analysis.embeddings {
+        if let Some(h) = has_embedding.get_mut(*idx as usize) {
+            *h = true;
+        }
+    }
+    let decisions: Vec<(SoundClass, f32)> = match (with.personal, yamnet) {
+        (Some(m), _) => analysis
+            .embeddings
+            .iter()
+            .map(|(_, e)| m.decide(&crate::personal::to_f32(e)))
+            .collect(),
+        (None, Some(y)) => {
+            // Одним пакетом: по одному окну на телефоне выходит в разы дольше.
+            let flat: Vec<f32> = analysis
+                .embeddings
+                .iter()
+                .flat_map(|(_, e)| e.iter().map(|x| x.to_f32()))
+                .collect();
+            y.scores_from_embeddings(&flat)
+                .as_chunks::<{ barklog_ml::NUM_CLASSES }>()
+                .0
+                .iter()
+                .map(|s| decide(&ClassScores::from_audioset(s), with.thresholds))
+                .collect()
+        }
+        (None, None) => Vec::new(),
+    };
+    for ((idx, _), (class, conf)) in analysis.embeddings.iter().zip(decisions) {
+        let i = *idx as usize;
+        if let Some(w) = analysis.windows.get_mut(i) {
+            w.class = background_as_silence(class, quiet[i]);
+            w.confidence = conf;
+        }
+    }
+    // Окна сверх лимита эмбеддингов: уверенность собачьего окна — вероятность «собака»,
+    // поэтому поднятый порог применяется и к ним.
+    if with.personal.is_none() {
+        for (i, w) in analysis.windows.iter_mut().enumerate() {
+            if !has_embedding[i] && w.class.is_dog() && w.confidence < with.thresholds.dog_min {
+                w.class = background_as_silence(SoundClass::Other, quiet[i]);
+                w.confidence = 1.0 - w.confidence;
             }
         }
     }
@@ -162,7 +222,14 @@ mod tests {
                 label: Label::Whine,
             },
         ];
-        reclassify(&mut a, None, &labels);
+        let th = Thresholds::default();
+        let with = Reclassify {
+            yamnet: None,
+            thresholds: &th,
+            analyzed_dog_min: Thresholds::default().dog_min,
+            personal: None,
+        };
+        reclassify(&mut a, &with, &labels);
         let classes: Vec<_> = a.windows.iter().map(|w| w.class).collect();
         use SoundClass::*;
         assert_eq!(
@@ -171,5 +238,39 @@ mod tests {
                 Other, Silence, Other, Silence, Bark, Silence, Whine, Silence, Whine, Silence
             ]
         );
+    }
+
+    #[test]
+    fn raised_threshold_drops_unsure_dog_windows() {
+        // Ровный фон −40 дБ, на нём два собачьих окна: уверенное и сомнительное.
+        let mut ws: Vec<_> = (0..6).map(|i| window(i, SoundClass::Other)).collect();
+        for w in &mut ws {
+            w.rms_db = -40.0;
+            w.gated = false;
+        }
+        ws[2].class = SoundClass::Bark;
+        ws[2].confidence = 0.9;
+        ws[2].rms_db = -20.0;
+        ws[4].class = SoundClass::Whine;
+        ws[4].confidence = 0.2;
+        let mut a = Analysis {
+            duration_ms: 6 * PATCH_HOP_MS,
+            windows: ws,
+            embeddings: Vec::new(),
+        };
+        let th = Thresholds {
+            dog_min: 0.5,
+            ..Thresholds::default()
+        };
+        let with = Reclassify {
+            yamnet: None,
+            thresholds: &th,
+            analyzed_dog_min: Thresholds::default().dog_min,
+            personal: None,
+        };
+        reclassify(&mut a, &with, &[]);
+        assert_eq!(a.windows[2].class, SoundClass::Bark);
+        // Тихое сомнительное окно — уже не собака и лежит на уровне фона.
+        assert_eq!(a.windows[4].class, SoundClass::Silence);
     }
 }

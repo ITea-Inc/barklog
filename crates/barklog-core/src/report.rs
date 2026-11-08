@@ -12,8 +12,19 @@ pub struct ReportSettings {
     pub merge_gap_ms: u64,
     /// Паузы короче этого не разрывают период активности собаки.
     pub activity_gap_ms: u64,
+    /// Эпизоды короче этого не считаются: их звук уходит в «другие звуки».
+    #[serde(default)]
+    pub min_episode_ms: u64,
     /// Ширина столбца таймлайна.
     pub timeline_bin_ms: u64,
+    /// Порог «собаки», с которым при анализе решены сохранённые окна. При другом
+    /// текущем пороге окна перерешиваются по эмбеддингам (см. [`crate::compact`]).
+    #[serde(default = "default_dog_min")]
+    pub windows_dog_min: f32,
+}
+
+fn default_dog_min() -> f32 {
+    crate::Thresholds::default().dog_min
 }
 
 impl ReportSettings {
@@ -38,7 +49,9 @@ impl Default for ReportSettings {
         Self {
             merge_gap_ms: 3_000,
             activity_gap_ms: 30_000,
+            min_episode_ms: 0,
             timeline_bin_ms: 60_000,
+            windows_dog_min: default_dog_min(),
         }
     }
 }
@@ -233,28 +246,24 @@ pub fn build_report(
     started_at: Option<StartTime>,
     source: Option<String>,
 ) -> Report {
-    let slots = slots(analysis);
+    let mut slots = slots(analysis);
     let duration = analysis.duration_ms;
 
-    let mut episodes: Vec<Episode> = SoundClass::DOG
-        .iter()
-        .flat_map(|&class| {
-            group(&slots, settings.merge_gap_ms, |s| s.class == class)
-                .into_iter()
-                .map(move |g| {
-                    let sound_ms = g.iter().map(|s| s.end - s.start).sum();
-                    Episode {
-                        class,
-                        start_ms: g[0].start,
-                        end_ms: g.last().unwrap().end,
-                        sound_ms,
-                        peak_db: g.iter().map(|s| s.peak_db).fold(f32::MIN, f32::max),
-                        confidence: g.iter().map(|s| s.confidence).sum::<f32>() / g.len() as f32,
-                    }
-                })
-        })
-        .collect();
-    episodes.sort_by_key(|e| e.start_ms);
+    let mut episodes = find_episodes(&slots, settings.merge_gap_ms);
+    if settings.min_episode_ms > 0 {
+        let (short, kept): (Vec<Episode>, Vec<Episode>) = episodes
+            .into_iter()
+            .partition(|e| e.span_ms() < settings.min_episode_ms);
+        for e in &short {
+            for s in slots
+                .iter_mut()
+                .filter(|s| s.class == e.class && s.start >= e.start_ms && s.end <= e.end_ms)
+            {
+                s.class = SoundClass::Other;
+            }
+        }
+        episodes = kept;
+    }
 
     let bouts: Vec<Bout> = group(&slots, settings.activity_gap_ms, |s| s.class.is_dog())
         .into_iter()
@@ -330,6 +339,30 @@ pub fn build_report(
         bouts,
         windows: Vec::new(),
     }
+}
+
+/// Эпизоды: отрезки одного собачьего класса, склеенные через паузы до `merge_gap_ms`.
+fn find_episodes(slots: &[Slot], merge_gap_ms: u64) -> Vec<Episode> {
+    let mut episodes: Vec<Episode> = SoundClass::DOG
+        .iter()
+        .flat_map(|&class| {
+            group(slots, merge_gap_ms, |s| s.class == class)
+                .into_iter()
+                .map(move |g| {
+                    let sound_ms = g.iter().map(|s| s.end - s.start).sum();
+                    Episode {
+                        class,
+                        start_ms: g[0].start,
+                        end_ms: g.last().unwrap().end,
+                        sound_ms,
+                        peak_db: g.iter().map(|s| s.peak_db).fold(f32::MIN, f32::max),
+                        confidence: g.iter().map(|s| s.confidence).sum::<f32>() / g.len() as f32,
+                    }
+                })
+        })
+        .collect();
+    episodes.sort_by_key(|e| e.start_ms);
+    episodes
 }
 
 /// Раскладывает отрезки по корзинам с границами `edges` (по возрастанию).
@@ -475,6 +508,21 @@ mod tests {
         assert_eq!(r.episodes[0].sound_ms, 4 * PATCH_HOP_MS);
         // Пауза 8 окон = 3.84 с > 3 с — два эпизода.
         assert_eq!(report("bb........bb").episodes.len(), 2);
+    }
+
+    #[test]
+    fn short_episodes_go_to_other() {
+        let settings = ReportSettings {
+            min_episode_ms: 3 * PATCH_HOP_MS,
+            ..ReportSettings::default()
+        };
+        // Одиночный гав (1 окно) отбрасывается, лай из 4 окон остаётся.
+        let r = build_report(&analysis("b...........bbbb"), &settings, None, None);
+        assert_eq!(r.episodes.len(), 1);
+        assert_eq!(r.episodes[0].start_ms, 12 * PATCH_HOP_MS);
+        assert_eq!(stat(&r, SoundClass::Bark).time_ms, 4 * PATCH_HOP_MS);
+        assert_eq!(stat(&r, SoundClass::Other).time_ms, PATCH_HOP_MS);
+        assert_eq!(r.stats.first_dog_sound_ms, Some(12 * PATCH_HOP_MS));
     }
 
     #[test]

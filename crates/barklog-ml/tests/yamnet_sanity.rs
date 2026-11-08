@@ -73,3 +73,29 @@ fn sine_is_sine_wave() {
         .collect();
     assert_in_top(&m, &sine, "Sine wave");
 }
+
+#[test]
+fn scores_from_embedding_match_full_pass() {
+    let Some(m) = model() else { return };
+    let wave: Vec<f32> = (0..32_000)
+        .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 16_000.0).sin() * 0.3)
+        .collect();
+    let mut fx = FeatureExtractor::new();
+    let mut patches = Vec::new();
+    fx.push(&wave, &mut patches);
+    let preds = m.predict(&patches);
+    assert!(preds.len() > 1);
+    let flat: Vec<f32> = preds
+        .iter()
+        .flat_map(|p| p.embedding.iter().copied())
+        .collect();
+    let again = m.scores_from_embeddings(&flat);
+    let full: Vec<f32> = preds
+        .iter()
+        .flat_map(|p| p.scores.iter().copied())
+        .collect();
+    assert_eq!(again.len(), full.len());
+    for (a, b) in full.iter().zip(&again) {
+        assert!((a - b).abs() < 1e-5);
+    }
+}

@@ -19,8 +19,9 @@ const BATCH_PATCHES: usize = 64;
 /// Насколько быстро оценка фонового шума может расти, дБ на окно (≈ 6 дБ в минуту).
 const FLOOR_RISE_DB: f32 = 0.05;
 /// Окно — кандидат для личной модели, если YAMNet хоть немного слышит собаку или животное.
-/// Порог ниже `dog_min`: так личная модель может «спасти» тихий скулёж.
-const CANDIDATE_DOG: f32 = 0.05;
+/// Порог ниже `dog_min`: так личная модель может «спасти» тихий скулёж. Эмбеддинги
+/// кандидатов сохраняются, поэтому `dog_min` можно менять задним числом не ниже этого.
+pub const CANDIDATE_DOG: f32 = 0.05;
 const CANDIDATE_ANIMAL: f32 = 0.2;
 /// Сколько эмбеддингов держать за сессию (по 2 КБ): хватает на ~1,5 ч голоса собаки.
 const MAX_EMBEDDINGS: usize = 12_000;
@@ -85,7 +86,7 @@ pub struct StreamAnalyzer<M: Borrow<Yamnet>> {
     pending: Vec<Patch>,
     windows: Vec<WindowResult>,
     embeddings: Vec<(u32, Vec<f16>)>,
-    noise_floor_db: Option<f32>,
+    floor: NoiseFloor,
     gated: usize,
 }
 
@@ -101,7 +102,7 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
             pending: Vec::new(),
             windows: Vec::new(),
             embeddings: Vec::new(),
-            noise_floor_db: None,
+            floor: NoiseFloor::default(),
             gated: 0,
         }
     }
@@ -185,7 +186,7 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
         let (gated, near_floor): (Vec<bool>, Vec<bool>) = patches
             .iter()
             .map(|p| {
-                let (gate, quiet) = self.level(p.rms_db);
+                let (gate, quiet) = self.floor.level(p.rms_db, &self.thresholds);
                 (self.use_gate && gate, quiet)
             })
             .unzip();
@@ -209,12 +210,7 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
                     Some(m) if candidate => m.decide(&pred.embedding),
                     _ => decide(&scores, &self.thresholds),
                 };
-                // Громкий фон (шумный диктофон) проходит гейт, но без собаки это та же тишина.
-                let (class, conf) = if class == SoundClass::Other && quiet {
-                    (SoundClass::Silence, conf)
-                } else {
-                    (class, conf)
-                };
+                let class = background_as_silence(class, quiet);
                 if (candidate || class.is_dog()) && self.embeddings.len() < MAX_EMBEDDINGS {
                     let index = self.windows.len() as u32;
                     self.embeddings.push((index, to_f16(&pred.embedding)));
@@ -232,21 +228,37 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
             });
         }
     }
+}
 
-    /// Обновляет оценку фонового шума и возвращает (отсеять ли окно гейтом, на уровне ли оно фона).
+/// Оценка фонового шума по ходу записи.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct NoiseFloor {
+    db: Option<f32>,
+}
+
+impl NoiseFloor {
+    /// Обновляет оценку и возвращает (отсеять ли окно гейтом, на уровне ли оно фона).
     /// Оценка быстро падает к тихим окнам и медленно растёт, поэтому лай её не «поднимает».
     /// Громкие окна гейтом не отсеиваются никогда — иначе запись, начавшаяся с лая, стала бы
     /// «фоном»; такие окна идут в сеть, и только если собаки в них нет, считаются тишиной.
-    fn level(&mut self, rms_db: f32) -> (bool, bool) {
-        let floor = match self.noise_floor_db {
+    pub(crate) fn level(&mut self, rms_db: f32, th: &Thresholds) -> (bool, bool) {
+        let floor = match self.db {
             None => rms_db,
             Some(f) => rms_db.min(f + FLOOR_RISE_DB),
         };
-        self.noise_floor_db = Some(floor);
-        let th = &self.thresholds;
+        self.db = Some(floor);
         let near_floor = rms_db < floor + th.gate_margin_db;
         let gate = rms_db < th.silence_db || (rms_db < th.quiet_max_db && near_floor);
         (gate, near_floor || rms_db < th.silence_db)
+    }
+}
+
+/// Громкий фон (шумный диктофон) проходит гейт, но без собаки это та же тишина.
+pub(crate) fn background_as_silence(class: SoundClass, quiet: bool) -> SoundClass {
+    if class == SoundClass::Other && quiet {
+        SoundClass::Silence
+    } else {
+        class
     }
 }
 

@@ -13,7 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use barklog_audio::{AudioSource, FileSource, TARGET_RATE};
 use barklog_core::{
-    Report, ReportSettings, SoundClass, StartSource, StartTime, Thresholds, analyze, build_report,
+    Report, Sensitivity, SoundClass, StartSource, StartTime, analyze, build_report,
     start_from_modified, start_from_name,
 };
 use barklog_ml::Yamnet;
@@ -66,12 +66,15 @@ struct AnalyzeArgs {
     /// Сколько самых длинных эпизодов сохранить фрагментами .wav (0 — не сохранять)
     #[arg(long, default_value_t = 20)]
     clips: usize,
-    /// Порог «собачьей» вероятности, 0–1
-    #[arg(long, default_value_t = Thresholds::default().dog_min)]
+    /// Порог «собачьей» вероятности, 0,05–0,9
+    #[arg(long, default_value_t = Sensitivity::default().dog_min)]
     dog_min: f32,
     /// Паузы короче этого (с) не разрывают эпизод
-    #[arg(long, default_value_t = 3)]
-    merge_gap: u64,
+    #[arg(long, default_value_t = Sensitivity::default().merge_gap_ms as f64 / 1000.0)]
+    merge_gap: f64,
+    /// Эпизоды короче этого (с) не считаются
+    #[arg(long, default_value_t = Sensitivity::default().min_episode_ms as f64 / 1000.0)]
+    min_episode: f64,
     /// Прогонять через сеть все окна, без отсева тишины (медленнее)
     #[arg(long)]
     no_gate: bool,
@@ -159,23 +162,29 @@ fn run_analyze(args: AnalyzeArgs) -> Result<()> {
             .progress_chars("━━ "),
     );
     let started = Instant::now();
-    let thresholds = Thresholds {
+    let sensitivity = Sensitivity {
         dog_min: args.dog_min,
-        ..Thresholds::default()
-    };
-    let analysis = analyze(&mut source, &model, thresholds, !args.no_gate, None, |p| {
-        bar.set_position(p.processed_ms);
-        bar.set_message(fmt::counter(p.processed_ms));
-        true
-    })?;
+        merge_gap_ms: (args.merge_gap.max(0.0) * 1000.0) as u64,
+        min_episode_ms: (args.min_episode.max(0.0) * 1000.0) as u64,
+    }
+    .clamped();
+    let analysis = analyze(
+        &mut source,
+        &model,
+        sensitivity.thresholds(),
+        !args.no_gate,
+        None,
+        |p| {
+            bar.set_position(p.processed_ms);
+            bar.set_message(fmt::counter(p.processed_ms));
+            true
+        },
+    )?;
     bar.finish_and_clear();
     let elapsed = started.elapsed();
 
     let started_at = resolve_start(&args, analysis.duration_ms)?;
-    let settings = ReportSettings {
-        merge_gap_ms: args.merge_gap * 1000,
-        ..ReportSettings::for_duration(analysis.duration_ms)
-    };
+    let settings = sensitivity.report_settings(analysis.duration_ms);
     let mut report = build_report(&analysis, &settings, started_at, Some(file_name.clone()));
 
     let out_dir = args
