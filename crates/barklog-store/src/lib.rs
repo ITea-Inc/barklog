@@ -35,6 +35,8 @@ pub struct SessionSummary {
     pub howl_ms: u64,
     pub growl_ms: u64,
     pub episodes: u32,
+    /// Заметка хозяина к сессии («оставил конг», «ушёл на 6 ч»).
+    pub note: Option<String>,
 }
 
 impl SessionSummary {
@@ -94,6 +96,8 @@ const MIGRATIONS: &[&str] = &[
         name  TEXT PRIMARY KEY,
         data  TEXT NOT NULL
     );",
+    // 5: заметка к сессии.
+    "ALTER TABLE sessions ADD COLUMN note TEXT;",
 ];
 
 pub struct Store {
@@ -181,7 +185,7 @@ impl Store {
     pub fn list(&self) -> Result<Vec<SessionSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at_ms, source_name, started_at_ms, utc_offset_min, start_source,
-                    duration_ms, dog_ms, bark_ms, whine_ms, howl_ms, growl_ms, episodes
+                    duration_ms, dog_ms, bark_ms, whine_ms, howl_ms, growl_ms, episodes, note
              FROM sessions ORDER BY coalesce(started_at_ms, created_at_ms) DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -205,6 +209,7 @@ impl Store {
                 howl_ms: r.get::<_, i64>(10)? as u64,
                 growl_ms: r.get::<_, i64>(11)? as u64,
                 episodes: r.get(12)?,
+                note: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -226,6 +231,25 @@ impl Store {
             .optional()?;
         row.map(|(json, uri)| Ok((serde_json::from_str(&json)?, uri)))
             .transpose()
+    }
+
+    pub fn note(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT note FROM sessions WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten())
+    }
+
+    /// `None` — убрать заметку. `false`, если такой сессии нет.
+    pub fn set_note(&self, id: i64, note: Option<&str>) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET note = ?2 WHERE id = ?1",
+            params![id, note],
+        )?;
+        Ok(n > 0)
     }
 
     /// `true`, если сессия была и удалена.
@@ -560,6 +584,17 @@ mod tests {
         );
         store.delete_model("personal").unwrap();
         assert_eq!(store.load_model("personal").unwrap(), None);
+
+        assert_eq!(store.note(id).unwrap(), None);
+        assert!(store.set_note(id, Some("оставил конг")).unwrap());
+        assert_eq!(store.note(id).unwrap().as_deref(), Some("оставил конг"));
+        assert_eq!(
+            store.list().unwrap()[0].note.as_deref(),
+            Some("оставил конг")
+        );
+        store.set_note(id, None).unwrap();
+        assert_eq!(store.note(id).unwrap(), None);
+        assert!(!store.set_note(id + 100, Some("x")).unwrap());
 
         assert_eq!(store.load_setting("sensitivity").unwrap(), None);
         store.save_setting("sensitivity", "{}").unwrap();

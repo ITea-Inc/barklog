@@ -39,6 +39,8 @@ import uniffi.barklog_ffi.LabelInfo
 import uniffi.barklog_ffi.LabelKind
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.LaunchedEffect
@@ -127,6 +129,8 @@ private fun Report(r: SessionReport, vm: MainViewModel, onChanged: (SessionRepor
             }
         }
 
+        item { NotePanel(r, vm, onChanged) }
+
         item {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -187,6 +191,50 @@ private fun Report(r: SessionReport, vm: MainViewModel, onChanged: (SessionRepor
                     style = Bark.type.mono.copy(color = c.muted),
                 )
             }
+        }
+    }
+}
+
+/** Заметка к сессии: что было иначе в этот раз — чтобы потом видеть, что помогает. */
+@Composable
+private fun NotePanel(r: SessionReport, vm: MainViewModel, onChanged: (SessionReport) -> Unit) {
+    val c = Bark.colors
+    val scope = rememberCoroutineScope()
+    val saved = r.note.orEmpty()
+    var text by remember(r.id, saved) { mutableStateOf(saved) }
+    var saving by remember { mutableStateOf(false) }
+    Panel(Modifier.fillMaxWidth(), padding = 16.dp) {
+        Text("Заметка", style = Bark.type.caption)
+        Spacer(Modifier.height(8.dp))
+        BasicTextField(
+            value = text,
+            onValueChange = { text = it.take(1_000) },
+            textStyle = Bark.type.body,
+            cursorBrush = SolidColor(c.bark),
+            modifier = Modifier.fillMaxWidth(),
+            decorationBox = { inner ->
+                if (text.isEmpty()) {
+                    Text("Например: оставил конг, ушёл на 6 часов, включил радио", style = Bark.type.body.copy(color = c.muted))
+                }
+                inner()
+            },
+        )
+        if (text.trim() != saved && !saving) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Сохранить",
+                style = Bark.type.body.copy(color = c.text),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable {
+                        saving = true
+                        scope.launch {
+                            vm.setNote(r.id, text).onSuccess { onChanged(r.copy(note = it)) }
+                            saving = false
+                        }
+                    }
+                    .padding(vertical = 4.dp),
+            )
         }
     }
 }

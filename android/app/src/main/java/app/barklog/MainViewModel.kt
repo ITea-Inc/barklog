@@ -298,6 +298,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         null
     }
 
+    /** Сохраняет заметку к сессии; пустая убирает её. Возвращает сохранённый текст или null при ошибке. */
+    suspend fun setNote(id: Long, note: String): Result<String?> = try {
+        val core = barkApp.core()
+        Result.success(withContext(Dispatchers.IO) { core.setNote(id, note) }).also { refresh() }
+    } catch (e: BarkLogException) {
+        _error.value = e.cleanMessage()
+        Result.failure(e)
+    }
+
     fun delete(id: Long) {
         viewModelScope.launch {
             val core = barkApp.core()

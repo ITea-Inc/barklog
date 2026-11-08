@@ -439,6 +439,10 @@ private fun SessionRow(s: SessionSummary, onClick: () -> Unit) {
             Text(title, style = Bark.type.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(2.dp))
             Text(subtitle, style = Bark.type.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            s.note?.let {
+                Spacer(Modifier.height(2.dp))
+                Text(it, style = Bark.type.caption.copy(color = c.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
         Spacer(Modifier.width(12.dp))
         Box(contentAlignment = Alignment.CenterEnd) {

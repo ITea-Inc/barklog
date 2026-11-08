@@ -116,6 +116,7 @@ pub struct SessionSummary {
     pub howl_ms: u64,
     pub growl_ms: u64,
     pub episodes: u32,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -273,6 +274,8 @@ pub struct SessionReport {
     pub editable: bool,
     /// Ответы пользователя, включая «не собака» (такие эпизоды из списка пропадают).
     pub labels: Vec<LabelInfo>,
+    /// Заметка хозяина к сессии.
+    pub note: Option<String>,
     pub started_at: Option<StartInfo>,
     pub duration_ms: u64,
     pub dog_ms: u64,
@@ -300,6 +303,7 @@ impl SessionReport {
             source_uri,
             editable: false,
             labels: Vec::new(),
+            note: None,
             started_at: r.started_at.map(Into::into),
             duration_ms: s.duration_ms,
             dog_ms: s.dog_time_ms,
@@ -391,6 +395,8 @@ pub struct BarkLog {
 
 const PERSONAL_MODEL: &str = "personal";
 const SENSITIVITY: &str = "sensitivity";
+/// Заметка — пара фраз, не дневник.
+const MAX_NOTE_CHARS: usize = 1_000;
 /// Ниже этой точности на отложенной выборке модель не применяем.
 const MIN_PERSONAL_ACCURACY: f32 = 0.6;
 
@@ -477,6 +483,7 @@ impl BarkLog {
                 howl_ms: s.howl_ms,
                 growl_ms: s.growl_ms,
                 episodes: s.episodes,
+                note: s.note,
             })
             .collect())
     }
@@ -487,6 +494,7 @@ impl BarkLog {
         let labels = store.labels(id)?;
         let mut out = SessionReport::from_core(id, report, uri);
         out.editable = store.has_analysis(id)?;
+        out.note = store.note(id)?;
         for e in &mut out.episodes {
             e.label = labels
                 .iter()
@@ -654,6 +662,16 @@ impl BarkLog {
 
     pub fn delete_session(&self, id: i64) -> Result<bool> {
         Ok(self.store.lock().unwrap().delete(id)?)
+    }
+
+    /// Заметка к сессии; пустая строка убирает её. Возвращает сохранённый текст.
+    pub fn set_note(&self, id: i64, note: String) -> Result<Option<String>> {
+        let note: String = note.trim().chars().take(MAX_NOTE_CHARS).collect();
+        let note = (!note.is_empty()).then_some(note);
+        if !self.store.lock().unwrap().set_note(id, note.as_deref())? {
+            return Err(BarkLogError::NotFound);
+        }
+        Ok(note)
     }
 
     pub fn sensitivity(&self) -> SensitivitySettings {
@@ -1124,6 +1142,28 @@ mod tests {
             .unwrap();
         let before = bl.get_report(id).unwrap();
         assert!(before.editable);
+        assert_eq!(before.note, None);
+        assert_eq!(
+            bl.set_note(
+                id,
+                "  оставил конг 
+"
+                .into()
+            )
+            .unwrap()
+            .as_deref(),
+            Some("оставил конг")
+        );
+        assert_eq!(
+            bl.get_report(id).unwrap().note.as_deref(),
+            Some("оставил конг")
+        );
+        assert_eq!(bl.set_note(id, "   ".into()).unwrap(), None);
+        assert_eq!(bl.list_sessions().unwrap()[0].note, None);
+        assert!(matches!(
+            bl.set_note(id + 100, "x".into()),
+            Err(BarkLogError::NotFound)
+        ));
         assert_eq!(before.dog_ms, n * 480);
 
         // Одинаковые звуки с разными ответами — модель не различает их и не сохраняется.
