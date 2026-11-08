@@ -13,6 +13,8 @@ use barklog_core::{AnalyzeError, LiveRecorder, PersonalModel, Sensitivity, analy
 use barklog_ml::Yamnet;
 use barklog_store::Store;
 
+mod csv;
+
 uniffi::setup_scaffolding!();
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -739,6 +741,16 @@ impl BarkLog {
                 dog_percent: b.dog_percent,
             })
             .collect())
+    }
+
+    /// Эпизоды записи в CSV (`;`, десятичная запятая, BOM — для Excel).
+    pub fn export_episodes_csv(&self, id: i64) -> Result<String> {
+        Ok(csv::episodes(&self.get_report(id)?))
+    }
+
+    /// Все записи в CSV, по строке на запись.
+    pub fn export_sessions_csv(&self) -> Result<String> {
+        Ok(csv::sessions(&self.list_sessions()?))
     }
 
     pub fn sensitivity(&self) -> SensitivitySettings {

@@ -72,6 +72,24 @@ fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () 
                 Text("Записи", style = Bark.type.body)
             }
             Spacer(Modifier.weight(1f))
+            report?.let { r ->
+                Box {
+                    var menu by remember { mutableStateOf(false) }
+                    TextButton(onClick = { menu = true }) {
+                        Text("Поделиться", style = Bark.type.body.copy(color = c.text2))
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Отчёт PDF — для кинолога", style = Bark.type.body) },
+                            onClick = { menu = false; vm.sharePdf(r) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Таблица эпизодов CSV", style = Bark.type.body) },
+                            onClick = { menu = false; vm.shareEpisodesCsv(r) },
+                        )
+                    }
+                }
+            }
             TextButton(onClick = { confirmDelete = true }) {
                 Text("Удалить", style = Bark.type.body.copy(color = c.text2))
             }

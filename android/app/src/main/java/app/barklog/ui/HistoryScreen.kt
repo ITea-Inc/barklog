@@ -115,6 +115,12 @@ fun HistoryScreen(vm: MainViewModel, onBack: () -> Unit, onOpen: (Long) -> Unit)
         if (list.size >= 2) {
             item { Comparison(list, onOpen) }
         }
+        if (list.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(4.dp))
+                TextLink("Выгрузить все записи в CSV", c.text2, vm::shareSessionsCsv)
+            }
+        }
     }
 }
 

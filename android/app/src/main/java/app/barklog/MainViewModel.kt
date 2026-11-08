@@ -319,6 +319,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         emptyList()
     }
 
+    /** Готовит и отправляет PDF-отчёт о записи. */
+    fun sharePdf(r: SessionReport) = export("Не удалось подготовить PDF") {
+        Export.writePdf(barkApp, r) to "application/pdf"
+    }
+
+    /** Таблица эпизодов записи в CSV. */
+    fun shareEpisodesCsv(r: SessionReport) = export("Не удалось подготовить таблицу") {
+        val csv = barkApp.core().exportEpisodesCsv(r.id)
+        Export.writeCsv(barkApp, "${Export.baseName(r)}-episodes", csv) to "text/csv"
+    }
+
+    /** Все записи в CSV. */
+    fun shareSessionsCsv() = export("Не удалось подготовить таблицу") {
+        Export.writeCsv(barkApp, "barklog-sessions", barkApp.core().exportSessionsCsv()) to "text/csv"
+    }
+
+    private val _exporting = MutableStateFlow(false)
+    val exporting: StateFlow<Boolean> = _exporting.asStateFlow()
+
+    private fun export(failure: String, make: suspend () -> Pair<java.io.File, String>) {
+        viewModelScope.launch {
+            _exporting.value = true
+            try {
+                val (file, mime) = withContext(Dispatchers.IO) { make() }
+                Export.share(barkApp, file, mime, file.name)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = "$failure: ${(e as? BarkLogException)?.cleanMessage() ?: e.message ?: e.javaClass.simpleName}"
+            } finally {
+                _exporting.value = false
+            }
+        }
+    }
+
     fun delete(id: Long) {
         viewModelScope.launch {
             val core = barkApp.core()

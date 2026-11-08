@@ -111,7 +111,7 @@ const DAY_MS: i64 = 86_400_000;
 const _: () = assert!(SoundClass::DOG.len() == 4);
 
 /// Дата по дням от 1970-01-01 (алгоритм Говарда Хиннанта, обратный `days_from_civil`).
-fn civil_from_days(z: i64) -> Date {
+pub fn civil_from_days(z: i64) -> Date {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
