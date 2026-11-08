@@ -35,6 +35,13 @@ cargo build --release
 `barklog inspect запись.m4a` показывает топ классов AudioSet по каждому окну —
 удобно понять, за что модель принимает конкретный звук.
 
+## CI
+
+`.github/workflows/ci.yml` на каждый пуш в `main` и pull request:
+`cargo fmt --check`, `clippy -D warnings`, тесты (с моделью из LFS — тесты сети
+не пропускаются) и сборка debug-APK, который можно скачать из артефактов запуска.
+Версия Rust в CI закреплена (`RUST_TOOLCHAIN`), её поднимают вместе с локальной.
+
 ## Android
 
 Нужны Android SDK (платформа 36.1), NDK 30, JDK 21 (подойдёт `jbr` из Android Studio)

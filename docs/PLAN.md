@@ -166,8 +166,8 @@ fn retrain_personal_model() -> Result<TrainReport>;
 
 ## 6. Этапы
 
-### Этап 0 — каркас — готово (CI ещё не настроен)
-- git, workspace, CI (GitHub Actions: `fmt`, `clippy`, `test`);
+### Этап 0 — каркас — готово (CI заработает после публикации на GitHub)
+- git, workspace, CI (GitHub Actions: `fmt`, `clippy -D warnings`, `test`, сборка APK);
 - Git LFS для моделей.
 
 ### Этап 1 — ядро + CLI (MVP на компьютере) — готово, разбивка проверена на настоящей записи

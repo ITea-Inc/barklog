@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Версия Rust закреплена, чтобы новые предупреждения clippy не роняли CI сами по себе.
+  # Поднимать вручную вместе с локальной.
+  RUST_TOOLCHAIN: "1.99"
+
+jobs:
+  rust:
+    name: Rust — fmt, clippy, тесты
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Модель YAMNet лежит в Git LFS; без неё тесты сети пропускаются. Кэшируем,
+      # чтобы не тратить месячный лимит трафика LFS на каждый запуск.
+      - name: Список файлов LFS
+        run: git lfs ls-files --long | cut -d ' ' -f1 | sort > .lfs-ids
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs
+          key: lfs-${{ hashFiles('.lfs-ids') }}
+      - run: git lfs pull
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Тесты (проверяем, что модель на месте и тесты сети не пропущены)
+        run: |
+          test -s models/yamnet.safetensors
+          cargo test --workspace
+
+  android:
+    name: Android — сборка APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Список файлов LFS
+        run: git lfs ls-files --long | cut -d ' ' -f1 | sort > .lfs-ids
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs
+          key: lfs-${{ hashFiles('.lfs-ids') }}
+      - run: git lfs pull
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - run: cargo install cargo-ndk --locked
+
+      # Платформу, build-tools и NDK нужных версий Gradle скачивает сам (лицензии
+      # на раннерах GitHub уже приняты). Без google-services.json сборка идёт без Firebase.
+      - name: Сборка
+        working-directory: android
+        run: ./gradlew assembleDebug --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: barklog-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
