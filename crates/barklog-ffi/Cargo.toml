@@ -30,4 +30,3 @@ uniffi.workspace = true
 
 [dev-dependencies]
 hound.workspace = true
-half.workspace = true

@@ -4,7 +4,6 @@
 //! YAMNet знает собак вообще и путает тихий скулёж с плачем, а вой — с чем угодно.
 //! Пары десятков отмеченных фрагментов хватает, чтобы научиться звукам конкретной собаки.
 
-use half::f16;
 use serde::{Deserialize, Serialize};
 
 use crate::SoundClass;
@@ -122,14 +121,6 @@ impl PersonalModel {
             .expect("non-empty");
         (Label::ALL[best].class(), prob)
     }
-}
-
-pub fn to_f32(v: &[f16]) -> Vec<f32> {
-    v.iter().map(|x| x.to_f32()).collect()
-}
-
-pub fn to_f16(v: &[f32]) -> Vec<f16> {
-    v.iter().map(|&x| f16::from_f32(x)).collect()
 }
 
 /// Обучает модель на окнах с ответами пользователя.

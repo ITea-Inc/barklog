@@ -3,15 +3,14 @@
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use half::f16;
-
 use barklog_audio::{AudioError, AudioSource, TARGET_RATE};
 use barklog_ml::{FeatureExtractor, PATCH_HOP_MS, Patch, Yamnet};
 use serde::{Deserialize, Serialize};
 
 use crate::SoundClass;
 use crate::classify::{ClassScores, Thresholds, decide};
-use crate::personal::{PersonalModel, to_f16};
+use crate::embedding::Embedding;
+use crate::personal::PersonalModel;
 
 /// Сколько патчей копить перед запуском сети (≈ 30 с звука). Большой пакет
 /// эффективнее; для живой записи берут меньше — см. [`StreamAnalyzer::with_batch`].
@@ -23,8 +22,9 @@ const FLOOR_RISE_DB: f32 = 0.05;
 /// кандидатов сохраняются, поэтому `dog_min` можно менять задним числом не ниже этого.
 pub const CANDIDATE_DOG: f32 = 0.05;
 const CANDIDATE_ANIMAL: f32 = 0.2;
-/// Сколько эмбеддингов держать за сессию (по 2 КБ): хватает на ~1,5 ч голоса собаки.
-const MAX_EMBEDDINGS: usize = 12_000;
+/// Сколько эмбеддингов держать за сессию (по 1 КБ): ~4 ч собачьих и спорных звуков.
+/// Сверх лимита порог можно только поднимать, а личная модель этих окон не видит.
+const MAX_EMBEDDINGS: usize = 30_000;
 /// Шаг вызова колбэка прогресса.
 const PROGRESS_STEP_MS: u64 = 1_000;
 
@@ -46,10 +46,10 @@ pub struct WindowResult {
 pub struct Analysis {
     pub duration_ms: u64,
     pub windows: Vec<WindowResult>,
-    /// Эмбеддинги YAMNet для собачьих и «спорных» окон: (номер окна, вектор f16).
+    /// Эмбеддинги YAMNet для собачьих и «спорных» окон: (номер окна, сжатый вектор).
     /// Нужны, чтобы обучать личную модель и пересчитывать ею старые записи.
     #[serde(skip)]
-    pub embeddings: Vec<(u32, Vec<f16>)>,
+    pub embeddings: Vec<(u32, Embedding)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,7 +85,7 @@ pub struct StreamAnalyzer<M: Borrow<Yamnet>> {
     features: FeatureExtractor,
     pending: Vec<Patch>,
     windows: Vec<WindowResult>,
-    embeddings: Vec<(u32, Vec<f16>)>,
+    embeddings: Vec<(u32, Embedding)>,
     floor: NoiseFloor,
     gated: usize,
 }
@@ -213,7 +213,8 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
                 let class = background_as_silence(class, quiet);
                 if (candidate || class.is_dog()) && self.embeddings.len() < MAX_EMBEDDINGS {
                     let index = self.windows.len() as u32;
-                    self.embeddings.push((index, to_f16(&pred.embedding)));
+                    self.embeddings
+                        .push((index, Embedding::quantize(&pred.embedding)));
                 }
                 (class, conf, scores)
             };

@@ -1096,13 +1096,14 @@ mod tests {
                 scores: ClassScores::default(),
             })
             .collect();
-        let emb = |i: u64| -> Vec<half::f16> {
-            (0..1024)
+        let emb = |i: u64| -> core::Embedding {
+            let v: Vec<f32> = (0..1024)
                 .map(|k| {
                     let center = if (k % 2 == 0) == (i < 30) { 1.0 } else { 0.0 };
-                    half::f16::from_f32(center + ((i * 7 + k as u64) % 13) as f32 * 0.02)
+                    center + ((i * 7 + k as u64) % 13) as f32 * 0.02
                 })
-                .collect()
+                .collect();
+            core::Embedding::quantize(&v)
         };
         let analysis = Analysis {
             duration_ms: n * 480,

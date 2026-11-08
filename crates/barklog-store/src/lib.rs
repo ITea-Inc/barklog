@@ -6,8 +6,9 @@
 use std::path::Path;
 
 use barklog_core::compact::{decode_windows, encode_windows};
-use barklog_core::{Analysis, EpisodeLabel, Label, Report, SoundClass, StartSource, StartTime};
-use half::f16;
+use barklog_core::{
+    Analysis, Embedding, EpisodeLabel, Label, Report, SoundClass, StartSource, StartTime,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, thiserror::Error)]
@@ -133,7 +134,7 @@ impl Store {
             let mut stmt =
                 tx.prepare("INSERT INTO embeddings (session_id, window, vec) VALUES (?1, ?2, ?3)")?;
             for (window, vec) in &a.embeddings {
-                stmt.execute(params![id, window, f16_bytes(vec)])?;
+                stmt.execute(params![id, window, vec.to_bytes()])?;
             }
         }
         tx.commit()?;
@@ -274,11 +275,14 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare("SELECT window, vec FROM embeddings WHERE session_id = ?1 ORDER BY window")?;
-        let embeddings = stmt
-            .query_map([id], |r| {
-                Ok((r.get::<_, u32>(0)?, f16_vec(&r.get::<_, Vec<u8>>(1)?)))
-            })?
+        // Вектор старого формата (f16) читается тоже; повреждённый просто пропускаем.
+        let rows: Vec<(u32, Vec<u8>)> = stmt
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        let embeddings = rows
+            .into_iter()
+            .filter_map(|(w, b)| Embedding::from_bytes(&b).map(|e| (w, e)))
+            .collect();
         Ok(Some(Analysis {
             duration_ms: duration_ms as u64,
             windows: decode_windows(&bytes),
@@ -409,19 +413,6 @@ impl Store {
     }
 }
 
-fn f16_bytes(v: &[f16]) -> Vec<u8> {
-    v.iter().flat_map(|x| x.to_le_bytes()).collect()
-}
-
-fn f16_vec(bytes: &[u8]) -> Vec<f16> {
-    bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|b| f16::from_le_bytes(*b))
-        .collect()
-}
-
 fn source_key(s: StartSource) -> &'static str {
     match s {
         StartSource::Manual => "manual",
@@ -540,8 +531,8 @@ mod tests {
             duration_ms: 4800,
             windows,
             embeddings: vec![
-                (1, vec![f16::from_f32(0.5); 1024]),
-                (3, vec![f16::ONE; 1024]),
+                (1, Embedding::quantize(&[0.5; 1024])),
+                (3, Embedding::quantize(&[1.0; 1024])),
             ],
         };
         let r = report("live", None, 4);
@@ -550,7 +541,7 @@ mod tests {
         assert_eq!(back.windows.len(), 10);
         assert_eq!(back.windows[2].class, SoundClass::Bark);
         assert_eq!(back.embeddings.len(), 2);
-        assert_eq!(back.embeddings[0].1[7], f16::from_f32(0.5));
+        assert!((back.embeddings[0].1.to_f32()[7] - 0.5).abs() < 1e-5);
         assert_eq!(store.sessions_with_analysis().unwrap(), vec![id]);
 
         store.set_label(id, 0, 960, Some(Label::NotDog)).unwrap();

@@ -3,6 +3,7 @@
 pub mod classify;
 pub mod clips;
 pub mod compact;
+pub mod embedding;
 pub mod live;
 pub mod personal;
 pub mod pipeline;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub use classify::{ClassScores, Thresholds};
 pub use compact::EpisodeLabel;
+pub use embedding::Embedding;
 pub use live::{ActiveBout, LiveRecorder, LiveSnapshot, SYNC_FORMAT, SyncError};
 pub use personal::{Label, PersonalModel, TrainError};
 pub use pipeline::{Analysis, AnalyzeError, Progress, StreamAnalyzer, WindowResult, analyze};

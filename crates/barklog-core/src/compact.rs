@@ -100,14 +100,14 @@ pub fn reclassify(analysis: &mut Analysis, with: &Reclassify, labels: &[EpisodeL
         (Some(m), _) => analysis
             .embeddings
             .iter()
-            .map(|(_, e)| m.decide(&crate::personal::to_f32(e)))
+            .map(|(_, e)| m.decide(&e.to_f32()))
             .collect(),
         (None, Some(y)) => {
             // Одним пакетом: по одному окну на телефоне выходит в разы дольше.
             let flat: Vec<f32> = analysis
                 .embeddings
                 .iter()
-                .flat_map(|(_, e)| e.iter().map(|x| x.to_f32()))
+                .flat_map(|(_, e)| e.to_f32())
                 .collect();
             y.scores_from_embeddings(&flat)
                 .as_chunks::<{ barklog_ml::NUM_CLASSES }>()
@@ -153,7 +153,7 @@ pub fn training_samples(analysis: &Analysis, labels: &[EpisodeLabel]) -> Vec<(Ve
         .filter_map(|(idx, emb)| {
             let w = analysis.windows.get(*idx as usize)?;
             let l = labels.iter().find(|l| l.covers(w))?;
-            Some((crate::personal::to_f32(emb), l.label))
+            Some((emb.to_f32(), l.label))
         })
         .collect()
 }

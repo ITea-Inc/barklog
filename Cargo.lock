@@ -177,7 +177,6 @@ dependencies = [
  "barklog-core",
  "barklog-ml",
  "barklog-store",
- "half",
  "hound",
  "serde_json",
  "thiserror",
@@ -200,7 +199,6 @@ name = "barklog-store"
 version = "0.1.0"
 dependencies = [
  "barklog-core",
- "half",
  "rusqlite",
  "serde_json",
  "thiserror",
