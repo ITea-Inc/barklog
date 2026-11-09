@@ -13,7 +13,8 @@ use barklog_core::{
     AnalyzeError, LiveRecorder, PersonalModel, ReportSettings, Sensitivity, analyze, build_report,
 };
 use barklog_ml::Yamnet;
-use barklog_store::Store;
+use barklog_store::{FIRST_DOG, Store, personal_model_name};
+use std::collections::HashMap;
 
 mod csv;
 
@@ -265,6 +266,24 @@ pub struct TrendBucket {
     pub dog_percent: f32,
 }
 
+/// Собака: у каждой свои записи, тренды, отметки и личная модель.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DogInfo {
+    pub id: i64,
+    pub name: String,
+    pub sessions: u32,
+}
+
+impl From<barklog_store::Dog> for DogInfo {
+    fn from(d: barklog_store::Dog) -> Self {
+        Self {
+            id: d.id,
+            name: d.name,
+            sessions: d.sessions,
+        }
+    }
+}
+
 /// Значения по умолчанию и допустимые пределы — для ползунков настроек.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct SensitivityLimits {
@@ -424,12 +443,17 @@ pub struct SourceFile {
 pub struct BarkLog {
     model: Arc<Yamnet>,
     store: Arc<Mutex<Store>>,
-    personal: RwLock<Option<Arc<PersonalModel>>>,
+    /// Личные модели собак, загруженные из базы (`None` — у собаки модели нет).
+    personal: RwLock<HashMap<i64, Option<Arc<PersonalModel>>>>,
     sensitivity: RwLock<Sensitivity>,
+    /// Чьи записи показываются и к кому идут новые.
+    current_dog: RwLock<i64>,
 }
 
-const PERSONAL_MODEL: &str = "personal";
 const SENSITIVITY: &str = "sensitivity";
+const CURRENT_DOG: &str = "current_dog";
+/// Имя собаки — короткое, чтобы помещалось в шапку.
+const MAX_DOG_NAME_CHARS: usize = 40;
 /// Заметка — пара фраз, не дневник.
 const MAX_NOTE_CHARS: usize = 1_000;
 /// Ниже этой точности на отложенной выборке модель не применяем.
@@ -444,12 +468,13 @@ impl BarkLog {
             reason: e.to_string(),
         })?;
         let store = Store::open(&db_path)?;
-        // Повреждённую или устаревшую личную модель просто не используем.
-        let personal = store
-            .load_model(PERSONAL_MODEL)?
-            .and_then(|(json, _)| serde_json::from_str::<PersonalModel>(&json).ok())
-            .filter(|m| m.version == PersonalModel::VERSION)
-            .map(Arc::new);
+        let dogs = store.dogs()?;
+        let current_dog = store
+            .load_setting(CURRENT_DOG)?
+            .and_then(|s| s.parse::<i64>().ok())
+            .filter(|id| dogs.iter().any(|d| d.id == *id))
+            .or_else(|| dogs.first().map(|d| d.id))
+            .unwrap_or(FIRST_DOG);
         let sensitivity = store
             .load_setting(SENSITIVITY)?
             .and_then(|json| serde_json::from_str::<Sensitivity>(&json).ok())
@@ -458,8 +483,9 @@ impl BarkLog {
         Ok(Arc::new(Self {
             model: Arc::new(model),
             store: Arc::new(Mutex::new(store)),
-            personal: RwLock::new(personal),
+            personal: RwLock::new(HashMap::new()),
             sensitivity: RwLock::new(sensitivity),
+            current_dog: RwLock::new(current_dog),
         }))
     }
 
@@ -502,7 +528,7 @@ impl BarkLog {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        let list = self.store.lock().unwrap().list()?;
+        let list = self.store.lock().unwrap().list(Some(self.dog()))?;
         Ok(list
             .into_iter()
             .map(|s| SessionSummary {
@@ -575,6 +601,7 @@ impl BarkLog {
             recorder: Mutex::new(Some(recorder)),
             store: self.store.clone(),
             personal: self.personal(),
+            dog_id: self.dog(),
         }))
     }
 
@@ -620,13 +647,14 @@ impl BarkLog {
     }
 
     pub fn personal_status(&self) -> Result<PersonalStatus> {
+        let dog = self.dog();
         let store = self.store.lock().unwrap();
-        let (model, trained_at) = match store.load_model(PERSONAL_MODEL)? {
+        let (model, trained_at) = match store.load_model(&personal_model_name(dog))? {
             Some((json, at)) => (serde_json::from_str::<PersonalModel>(&json).ok(), Some(at)),
             None => (None, None),
         };
         let mut available = 0u32;
-        for id in store.sessions_with_analysis()? {
+        for id in store.sessions_with_analysis(Some(dog))? {
             let labels = store.labels(id)?;
             if labels.is_empty() {
                 continue;
@@ -643,18 +671,20 @@ impl BarkLog {
                 .map(|m| m.samples.clone())
                 .unwrap_or_default(),
             accuracy: model.as_ref().and_then(|m| m.accuracy),
-            labeled_episodes: store.label_count()?,
+            labeled_episodes: store.label_count(Some(dog))?,
             available_samples: available,
             min_samples: core::personal::MIN_SAMPLES as u32,
         })
     }
 
-    /// Обучает личную модель на всех отмеченных эпизодах и пересчитывает ею все записи.
+    /// Обучает личную модель текущей собаки на её отмеченных эпизодах и пересчитывает
+    /// ею записи этой собаки.
     pub fn train_personal(&self) -> Result<PersonalStatus> {
+        let dog = self.dog();
         let samples = {
             let store = self.store.lock().unwrap();
             let mut all = Vec::new();
-            for id in store.sessions_with_analysis()? {
+            for id in store.sessions_with_analysis(Some(dog))? {
                 let labels = store.labels(id)?;
                 if labels.is_empty() {
                     continue;
@@ -683,17 +713,102 @@ impl BarkLog {
         self.store
             .lock()
             .unwrap()
-            .save_model(PERSONAL_MODEL, &json, now_ms())?;
-        *self.personal.write().unwrap() = Some(Arc::new(model));
-        self.recompute_all()?;
+            .save_model(&personal_model_name(dog), &json, now_ms())?;
+        self.personal
+            .write()
+            .unwrap()
+            .insert(dog, Some(Arc::new(model)));
+        self.recompute_dog(dog)?;
         self.personal_status()
     }
 
-    /// Забывает личную модель; записи пересчитываются обратно по YAMNet и отметкам.
+    /// Забывает личную модель текущей собаки; её записи пересчитываются обратно
+    /// по YAMNet и отметкам.
     pub fn reset_personal(&self) -> Result<()> {
-        self.store.lock().unwrap().delete_model(PERSONAL_MODEL)?;
-        *self.personal.write().unwrap() = None;
-        self.recompute_all()
+        let dog = self.dog();
+        self.store
+            .lock()
+            .unwrap()
+            .delete_model(&personal_model_name(dog))?;
+        self.personal.write().unwrap().insert(dog, None);
+        self.recompute_dog(dog)
+    }
+
+    pub fn dogs(&self) -> Result<Vec<DogInfo>> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .dogs()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn current_dog(&self) -> i64 {
+        self.dog()
+    }
+
+    /// Делает собаку текущей: её записи в списке, к ней идут новые.
+    pub fn select_dog(&self, id: i64) -> Result<()> {
+        let store = self.store.lock().unwrap();
+        if !store.dogs()?.iter().any(|d| d.id == id) {
+            return Err(BarkLogError::NotFound);
+        }
+        store.save_setting(CURRENT_DOG, &id.to_string())?;
+        *self.current_dog.write().unwrap() = id;
+        Ok(())
+    }
+
+    /// Добавляет собаку (текущей не делает).
+    pub fn add_dog(&self, name: String) -> Result<DogInfo> {
+        let name = dog_name(&name)?;
+        let id = self.store.lock().unwrap().add_dog(&name, now_ms())?;
+        Ok(DogInfo {
+            id,
+            name,
+            sessions: 0,
+        })
+    }
+
+    pub fn rename_dog(&self, id: i64, name: String) -> Result<()> {
+        let name = dog_name(&name)?;
+        if !self.store.lock().unwrap().rename_dog(id, &name)? {
+            return Err(BarkLogError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Удаляет собаку без записей. Если она была текущей — текущей становится первая.
+    pub fn delete_dog(&self, id: i64) -> Result<()> {
+        let store = self.store.lock().unwrap();
+        if !store.delete_dog(id)? {
+            return Err(BarkLogError::Storage {
+                reason: "Удалить можно только собаку без записей, и хотя бы одна должна остаться. \
+                         Записи можно перенести к другой собаке"
+                    .into(),
+            });
+        }
+        self.personal.write().unwrap().remove(&id);
+        if self.dog() == id {
+            let first = store.dogs()?.first().map(|d| d.id).unwrap_or(FIRST_DOG);
+            store.save_setting(CURRENT_DOG, &first.to_string())?;
+            *self.current_dog.write().unwrap() = first;
+        }
+        Ok(())
+    }
+
+    /// Переносит запись к другой собаке и пересчитывает её личной моделью той собаки.
+    pub fn move_session(&self, session_id: i64, dog_id: i64) -> Result<()> {
+        if !self
+            .store
+            .lock()
+            .unwrap()
+            .set_session_dog(session_id, dog_id)?
+        {
+            return Err(BarkLogError::NotFound);
+        }
+        self.recompute(session_id)
     }
 
     pub fn delete_session(&self, id: i64) -> Result<bool> {
@@ -717,7 +832,7 @@ impl BarkLog {
             .store
             .lock()
             .unwrap()
-            .list()?
+            .list(Some(self.dog()))?
             .into_iter()
             .map(|s| {
                 let (start, offset) = match s.started_at {
@@ -785,8 +900,30 @@ impl BarkLog {
 }
 
 impl BarkLog {
+    fn dog(&self) -> i64 {
+        *self.current_dog.read().unwrap()
+    }
+
+    /// Личная модель текущей собаки.
     fn personal(&self) -> Option<Arc<PersonalModel>> {
-        self.personal.read().unwrap().clone()
+        self.personal_for(self.dog()).ok().flatten()
+    }
+
+    /// Личная модель собаки; повреждённую или устаревшую просто не используем.
+    fn personal_for(&self, dog: i64) -> Result<Option<Arc<PersonalModel>>> {
+        if let Some(m) = self.personal.read().unwrap().get(&dog) {
+            return Ok(m.clone());
+        }
+        let model = self
+            .store
+            .lock()
+            .unwrap()
+            .load_model(&personal_model_name(dog))?
+            .and_then(|(json, _)| serde_json::from_str::<PersonalModel>(&json).ok())
+            .filter(|m| m.version == PersonalModel::VERSION)
+            .map(Arc::new);
+        self.personal.write().unwrap().insert(dog, model.clone());
+        Ok(model)
     }
 
     fn current_sensitivity(&self) -> Sensitivity {
@@ -795,6 +932,12 @@ impl BarkLog {
 
     /// Пересчитывает отчёт сессии по сохранённым окнам, чувствительности, личной модели и отметкам.
     fn recompute(&self, id: i64) -> Result<()> {
+        // Модель — той собаки, чья это запись (до блокировки базы: загрузка её тоже берёт).
+        let dog = self.store.lock().unwrap().session_dog(id)?;
+        let personal = match dog {
+            Some(d) => self.personal_for(d)?,
+            None => return Ok(()),
+        };
         let store = self.store.lock().unwrap();
         let Some(mut analysis) = store.analysis(id)? else {
             return Ok(());
@@ -809,7 +952,7 @@ impl BarkLog {
             old.source,
             Some(&self.model),
             &sensitivity,
-            self.personal().as_deref(),
+            personal.as_deref(),
             &labels,
         );
         store.update_report(id, &report)?;
@@ -817,7 +960,19 @@ impl BarkLog {
     }
 
     fn recompute_all(&self) -> Result<()> {
-        let ids = self.store.lock().unwrap().sessions_with_analysis()?;
+        let ids = self.store.lock().unwrap().sessions_with_analysis(None)?;
+        for id in ids {
+            self.recompute(id)?;
+        }
+        Ok(())
+    }
+
+    fn recompute_dog(&self, dog: i64) -> Result<()> {
+        let ids = self
+            .store
+            .lock()
+            .unwrap()
+            .sessions_with_analysis(Some(dog))?;
         for id in ids {
             self.recompute(id)?;
         }
@@ -836,7 +991,9 @@ impl BarkLog {
             .map(str::to_owned);
         let mut source = FileSource::from_file(f, ext.as_deref())?;
 
-        let personal = self.personal();
+        // Запись — той собаки, что была выбрана в начале, даже если за время анализа переключили.
+        let dog = self.dog();
+        let personal = self.personal_for(dog)?;
         let sensitivity = self.current_sensitivity();
         let analysis = analyze(
             &mut source,
@@ -868,15 +1025,17 @@ impl BarkLog {
             Some(file.display_name.clone()),
             None,
             &sensitivity,
-            self.personal().as_deref(),
+            self.personal_for(dog)?.as_deref(),
             &[],
         );
         let now = now_ms();
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
-            .insert(&report, now, file.uri.as_deref(), Some(&analysis))?)
+        Ok(self.store.lock().unwrap().insert_for_dog(
+            dog,
+            &report,
+            now,
+            file.uri.as_deref(),
+            Some(&analysis),
+        )?)
     }
 }
 
@@ -905,6 +1064,17 @@ fn finalize_report(
     let mut report = build_report(analysis, settings, started_at, source);
     report.stats.foreign_dog_ms = foreign as u64 * barklog_ml::PATCH_HOP_MS;
     report
+}
+
+/// Имя собаки без пробелов по краям, не пустое и не длиннее [`MAX_DOG_NAME_CHARS`].
+fn dog_name(name: &str) -> Result<String> {
+    let name: String = name.trim().chars().take(MAX_DOG_NAME_CHARS).collect();
+    if name.is_empty() {
+        return Err(BarkLogError::Storage {
+            reason: "Имя собаки не может быть пустым".into(),
+        });
+    }
+    Ok(name)
 }
 
 /// Префикс `source_uri` сессий, записанных в приложении: дальше — путь к фрагментам.
@@ -978,6 +1148,8 @@ pub struct LiveSession {
     store: Arc<Mutex<Store>>,
     /// Личная модель на момент начала записи — чтобы посчитать чужих собак в отчёте.
     personal: Option<Arc<PersonalModel>>,
+    /// Чья запись — собака, выбранная при старте.
+    dog_id: i64,
 }
 
 #[uniffi::export]
@@ -1027,11 +1199,13 @@ impl LiveSession {
             &[],
         );
         let uri = format!("{CLIPS_URI_PREFIX}{dir}");
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
-            .insert(&report, now_ms(), Some(&uri), Some(&analysis))?)
+        Ok(self.store.lock().unwrap().insert_for_dog(
+            self.dog_id,
+            &report,
+            now_ms(),
+            Some(&uri),
+            Some(&analysis),
+        )?)
     }
 }
 
@@ -1459,6 +1633,79 @@ mod tests {
         drop(bl);
         let bl = BarkLog::new(db.to_string_lossy().into_owned(), model).unwrap();
         assert_eq!(bl.sensitivity(), clamped);
+        drop(bl);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn dogs_have_their_own_sessions() {
+        use barklog_core::{Analysis, ClassScores, SoundClass, WindowResult};
+        let Some(model) = model_path() else { return };
+        let db = std::env::temp_dir().join(format!("barklog-ffi-dogs-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let bl = BarkLog::new(db.to_string_lossy().into_owned(), model.clone()).unwrap();
+        assert_eq!(bl.current_dog(), FIRST_DOG);
+
+        let windows: Vec<WindowResult> = (0..10)
+            .map(|i| WindowResult {
+                start_ms: i * 480,
+                class: SoundClass::Bark,
+                confidence: 0.9,
+                rms_db: -20.0,
+                peak_db: -10.0,
+                gated: false,
+                scores: ClassScores::default(),
+            })
+            .collect();
+        let analysis = Analysis {
+            duration_ms: 4800,
+            windows,
+            embeddings: Vec::new(),
+        };
+        let report = build_report(
+            &analysis,
+            &ReportSettings::default(),
+            None,
+            Some("a".into()),
+        );
+        let id = bl
+            .store
+            .lock()
+            .unwrap()
+            .insert(&report, 1, None, Some(&analysis))
+            .unwrap();
+
+        let rex = bl.add_dog("  Рекс  ".into()).unwrap();
+        assert_eq!(rex.name, "Рекс");
+        assert!(matches!(
+            bl.add_dog("   ".into()),
+            Err(BarkLogError::Storage { .. })
+        ));
+        bl.select_dog(rex.id).unwrap();
+        assert!(bl.list_sessions().unwrap().is_empty());
+        assert!(bl.trends(TrendPeriod::Week, 180).unwrap().is_empty());
+        assert_eq!(bl.personal_status().unwrap().labeled_episodes, 0);
+
+        bl.move_session(id, rex.id).unwrap();
+        assert_eq!(bl.list_sessions().unwrap().len(), 1);
+        assert!(bl.delete_dog(rex.id).is_err(), "с записями не удалить");
+        bl.rename_dog(rex.id, "Рексик".into()).unwrap();
+
+        // Выбор собаки переживает перезапуск.
+        drop(bl);
+        let bl = BarkLog::new(db.to_string_lossy().into_owned(), model).unwrap();
+        assert_eq!(bl.current_dog(), rex.id);
+        assert_eq!(bl.dogs().unwrap()[1].name, "Рексик");
+
+        bl.move_session(id, FIRST_DOG).unwrap();
+        bl.delete_dog(rex.id).unwrap();
+        assert_eq!(
+            bl.current_dog(),
+            FIRST_DOG,
+            "после удаления текущей — первая"
+        );
+        assert_eq!(bl.list_sessions().unwrap().len(), 1);
+        assert!(bl.select_dog(rex.id).is_err());
         drop(bl);
         let _ = std::fs::remove_file(&db);
     }
