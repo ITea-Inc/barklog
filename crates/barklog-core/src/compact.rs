@@ -79,7 +79,10 @@ pub struct Reclassify<'a> {
 ///
 /// Эмбеддинги есть у всех окон, где YAMNet хоть немного слышал собаку
 /// (см. [`crate::pipeline::CANDIDATE_DOG`]), пока не кончился лимит на сессию.
-pub fn reclassify(analysis: &mut Analysis, with: &Reclassify, labels: &[EpisodeLabel]) {
+///
+/// Возвращает, сколько окон пришлось на чужих собак: в голос своей собаки они не
+/// входят (класс — «другие звуки»), но хозяину полезно знать, что соседи лаяли.
+pub fn reclassify(analysis: &mut Analysis, with: &Reclassify, labels: &[EpisodeLabel]) -> usize {
     // Та же оценка фона, что и при анализе: по ней «не собака» становится тишиной.
     let mut floor = NoiseFloor::default();
     let quiet: Vec<bool> = analysis
@@ -96,11 +99,16 @@ pub fn reclassify(analysis: &mut Analysis, with: &Reclassify, labels: &[EpisodeL
             *h = true;
         }
     }
-    let decisions: Vec<(SoundClass, f32)> = match (with.personal, yamnet) {
+    let mut foreign = vec![false; analysis.windows.len()];
+    // (класс, уверенность, чужая ли собака)
+    let decisions: Vec<(SoundClass, f32, bool)> = match (with.personal, yamnet) {
         (Some(m), _) => analysis
             .embeddings
             .iter()
-            .map(|(_, e)| m.decide(&e.to_f32()))
+            .map(|(_, e)| {
+                let (label, p) = m.decide_label(&e.to_f32());
+                (label.class(), p, label == Label::ForeignDog)
+            })
             .collect(),
         (None, Some(y)) => {
             // Одним пакетом: по одному окну на телефоне выходит в разы дольше.
@@ -113,16 +121,25 @@ pub fn reclassify(analysis: &mut Analysis, with: &Reclassify, labels: &[EpisodeL
                 .as_chunks::<{ barklog_ml::NUM_CLASSES }>()
                 .0
                 .iter()
-                .map(|s| decide(&ClassScores::from_audioset(s), with.thresholds))
+                .map(|s| {
+                    let (class, conf) = decide(&ClassScores::from_audioset(s), with.thresholds);
+                    (class, conf, false)
+                })
                 .collect()
         }
         (None, None) => Vec::new(),
     };
-    for ((idx, _), (class, conf)) in analysis.embeddings.iter().zip(decisions) {
+    for ((idx, _), (class, conf, is_foreign)) in analysis.embeddings.iter().zip(decisions) {
         let i = *idx as usize;
         if let Some(w) = analysis.windows.get_mut(i) {
-            w.class = background_as_silence(class, quiet[i]);
+            // Чужой лай — не фон, даже тихий: тишиной его не считаем.
+            w.class = if is_foreign {
+                class
+            } else {
+                background_as_silence(class, quiet[i])
+            };
             w.confidence = conf;
+            foreign[i] = is_foreign;
         }
     }
     // Окна сверх лимита эмбеддингов: уверенность собачьего окна — вероятность «собака»,
@@ -136,13 +153,21 @@ pub fn reclassify(analysis: &mut Analysis, with: &Reclassify, labels: &[EpisodeL
         }
     }
     for l in labels {
-        for w in analysis.windows.iter_mut().filter(|w| l.covers(w)) {
-            // «Не собака» снимает собачьи окна; «лай/скулёж/…» переназначает собачьи окна.
+        for (w, f) in analysis
+            .windows
+            .iter_mut()
+            .zip(foreign.iter_mut())
+            .filter(|(w, _)| l.covers(w))
+        {
+            // «Не собака» и «чужая собака» снимают собачьи окна; «лай/скулёж/…»
+            // переназначает собачьи окна.
             if w.class.is_dog() {
                 w.class = l.label.class();
+                *f = l.label == Label::ForeignDog;
             }
         }
     }
+    foreign.iter().filter(|&&f| f).count()
 }
 
 /// Обучающие примеры из одной сессии: окна с эмбеддингами внутри отмеченных эпизодов.
@@ -272,5 +297,29 @@ mod tests {
         assert_eq!(a.windows[2].class, SoundClass::Bark);
         // Тихое сомнительное окно — уже не собака и лежит на уровне фона.
         assert_eq!(a.windows[4].class, SoundClass::Silence);
+    }
+
+    #[test]
+    fn foreign_dog_label_counts_separately() {
+        let mut a = Analysis {
+            duration_ms: 6 * PATCH_HOP_MS,
+            windows: (0..6).map(|i| window(i, SoundClass::Bark)).collect(),
+            embeddings: Vec::new(),
+        };
+        let labels = [EpisodeLabel {
+            start_ms: 0,
+            end_ms: 2 * PATCH_HOP_MS,
+            label: Label::ForeignDog,
+        }];
+        let th = Thresholds::default();
+        let with = Reclassify {
+            yamnet: None,
+            thresholds: &th,
+            analyzed_dog_min: th.dog_min,
+            personal: None,
+        };
+        assert_eq!(reclassify(&mut a, &with, &labels), 2);
+        assert_eq!(a.windows[0].class, SoundClass::Other);
+        assert_eq!(a.windows[2].class, SoundClass::Bark);
     }
 }

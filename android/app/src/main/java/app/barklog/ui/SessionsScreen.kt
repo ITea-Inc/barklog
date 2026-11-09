@@ -320,7 +320,7 @@ private fun PersonalPanel(p: PersonalStatus, training: Boolean, onTrain: () -> U
             }
             p.labeledEpisodes == 0u ->
                 "Откройте отчёт и удерживайте эпизод, чтобы указать, что это было: лай, скулёж, " +
-                    "вой или не собака. По этим ответам приложение научится звукам вашей собаки"
+                    "вой, чужая собака или не собака. По этим ответам приложение научится звукам вашей собаки"
             else -> "Отмечено ${Fmt.episodes(p.labeledEpisodes.toInt())} · " +
                 "фрагментов для обучения ${minOf(available, need)} из $need"
         }

@@ -288,6 +288,14 @@ private fun Shares(r: SessionReport) {
                 .joinToString(" · ") { "${Fmt.label(it.kind).lowercase()} ${Fmt.percent(it.dogPercent!!)}" }
             Text("Среди голоса: $dogShares", style = Bark.type.caption)
         }
+        if (r.foreignDogMs > 0uL) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Чужие собаки — ${Fmt.duration(r.foreignDogMs)}. В голос вашей собаки не входят, " +
+                    "учтены в «других звуках»",
+                style = Bark.type.caption,
+            )
+        }
     }
 }
 
@@ -380,14 +388,14 @@ private fun EpisodesPanel(r: SessionReport, vm: MainViewModel, onChanged: (Sessi
     }
 }
 
-/** Отрезки, отмеченные «не собака»: из эпизодов они пропали, но их можно вернуть. */
+/** Отрезки, отмеченные «не собака» или «чужая собака»: из эпизодов они пропали, но их можно вернуть. */
 @Composable
 private fun NotDogList(r: SessionReport, onRestore: (LabelInfo) -> Unit) {
     val c = Bark.colors
-    val notDog = r.labels.filter { it.label == LabelKind.NOT_DOG }
+    val notDog = r.labels.filter { it.label == LabelKind.NOT_DOG || it.label == LabelKind.FOREIGN_DOG }
     if (notDog.isEmpty()) return
     Spacer(Modifier.height(16.dp))
-    Text("Отмечено «не собака»", style = Bark.type.caption.copy(color = c.text2))
+    Text("Убрано из голоса вашей собаки", style = Bark.type.caption.copy(color = c.text2))
     Spacer(Modifier.height(4.dp))
     notDog.forEach { l ->
         Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -397,7 +405,12 @@ private fun NotDogList(r: SessionReport, onRestore: (LabelInfo) -> Unit) {
                 modifier = Modifier.widthIn(min = 72.dp),
             )
             Spacer(Modifier.width(8.dp))
-            Text(Fmt.duration((l.endMs - l.startMs).toLong()), style = Bark.type.mono.copy(color = c.muted), modifier = Modifier.weight(1f))
+            Text(Fmt.duration((l.endMs - l.startMs).toLong()), style = Bark.type.mono.copy(color = c.muted))
+            Text(
+                if (l.label == LabelKind.FOREIGN_DOG) "  · чужая собака" else "  · не собака",
+                style = Bark.type.caption,
+                modifier = Modifier.weight(1f),
+            )
             Text(
                 "Вернуть",
                 style = Bark.type.body.copy(color = c.text2),
@@ -412,7 +425,8 @@ private val LABEL_CHOICES = listOf(
     LabelKind.WHINE to "Скулёж",
     LabelKind.HOWL to "Вой",
     LabelKind.GROWL to "Рычание",
-    LabelKind.NOT_DOG to "Не собака или чужая",
+    LabelKind.FOREIGN_DOG to "Чужая собака",
+    LabelKind.NOT_DOG to "Не собака",
 )
 
 @OptIn(ExperimentalFoundationApi::class)

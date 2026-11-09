@@ -120,6 +120,11 @@ pub struct Stats {
     pub longest_calm_ms: u64,
     /// Доля окон, отсеянных по громкости (сеть не запускалась), %.
     pub gated_percent: f32,
+    /// Сколько звучали чужие собаки (по отметкам хозяина и личной модели). Входит
+    /// в «другие звуки», не в голос своей собаки. Заполняет пересчёт — см.
+    /// [`crate::compact::reclassify`].
+    #[serde(default)]
+    pub foreign_dog_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +331,7 @@ pub fn build_report(
         longest_episode: episodes.iter().max_by_key(|e| e.span_ms()).cloned(),
         longest_calm_ms,
         gated_percent: pct(gated as u64, analysis.windows.len() as u64),
+        foreign_dog_ms: 0,
     };
 
     Report {

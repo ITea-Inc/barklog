@@ -167,6 +167,7 @@ fn label(l: LabelKind) -> &'static str {
         LabelKind::Howl => "вой",
         LabelKind::Growl => "рычание",
         LabelKind::NotDog => "не собака",
+        LabelKind::ForeignDog => "чужая собака",
     }
 }
 
@@ -249,6 +250,7 @@ mod tests {
             longest_episode_ms: Some(3_500),
             longest_calm_ms: 61_000,
             gated_percent: 0.0,
+            foreign_dog_ms: 0,
             merge_gap_ms: 3_000,
             timeline_bin_ms: 10_000,
             classes: Vec::new(),

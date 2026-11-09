@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use barklog_audio::{AudioSource, FileSource};
 use barklog_core as core;
-use barklog_core::{AnalyzeError, LiveRecorder, PersonalModel, Sensitivity, analyze, build_report};
+use barklog_core::{
+    AnalyzeError, LiveRecorder, PersonalModel, ReportSettings, Sensitivity, analyze, build_report,
+};
 use barklog_ml::Yamnet;
 use barklog_store::Store;
 
@@ -153,6 +155,8 @@ pub enum LabelKind {
     Howl,
     Growl,
     NotDog,
+    /// Чужая собака: не голос своей, для личной модели — отдельный класс.
+    ForeignDog,
 }
 
 impl From<core::Label> for LabelKind {
@@ -163,6 +167,7 @@ impl From<core::Label> for LabelKind {
             core::Label::Howl => LabelKind::Howl,
             core::Label::Growl => LabelKind::Growl,
             core::Label::NotDog => LabelKind::NotDog,
+            core::Label::ForeignDog => LabelKind::ForeignDog,
         }
     }
 }
@@ -175,6 +180,7 @@ impl From<LabelKind> for core::Label {
             LabelKind::Howl => core::Label::Howl,
             LabelKind::Growl => core::Label::Growl,
             LabelKind::NotDog => core::Label::NotDog,
+            LabelKind::ForeignDog => core::Label::ForeignDog,
         }
     }
 }
@@ -312,6 +318,8 @@ pub struct SessionReport {
     pub longest_episode_ms: Option<u64>,
     pub longest_calm_ms: u64,
     pub gated_percent: f32,
+    /// Сколько звучали чужие собаки (входит в «другие звуки»).
+    pub foreign_dog_ms: u64,
     pub merge_gap_ms: u64,
     pub timeline_bin_ms: u64,
     pub classes: Vec<ClassStat>,
@@ -340,6 +348,7 @@ impl SessionReport {
             longest_episode_ms: s.longest_episode.as_ref().map(|e| e.span_ms()),
             longest_calm_ms: s.longest_calm_ms,
             gated_percent: s.gated_percent,
+            foreign_dog_ms: s.foreign_dog_ms,
             merge_gap_ms: r.settings.merge_gap_ms,
             timeline_bin_ms: r.settings.timeline_bin_ms,
             classes: s
@@ -565,6 +574,7 @@ impl BarkLog {
         Ok(Arc::new(LiveSession {
             recorder: Mutex::new(Some(recorder)),
             store: self.store.clone(),
+            personal: self.personal(),
         }))
     }
 
@@ -791,18 +801,17 @@ impl BarkLog {
         };
         let old = store.get(id)?.ok_or(BarkLogError::NotFound)?;
         let labels = store.labels(id)?;
-        let personal = self.personal();
         let sensitivity = self.current_sensitivity();
-        let thresholds = sensitivity.thresholds();
-        let with = core::compact::Reclassify {
-            yamnet: Some(&self.model),
-            thresholds: &thresholds,
-            analyzed_dog_min: old.settings.windows_dog_min,
-            personal: personal.as_deref(),
-        };
-        core::compact::reclassify(&mut analysis, &with, &labels);
-        let settings = sensitivity.apply(&old.settings);
-        let report = build_report(&analysis, &settings, old.started_at, old.source);
+        let report = finalize_report(
+            &mut analysis,
+            &sensitivity.apply(&old.settings),
+            old.started_at,
+            old.source,
+            Some(&self.model),
+            &sensitivity,
+            self.personal().as_deref(),
+            &labels,
+        );
         store.update_report(id, &report)?;
         Ok(())
     }
@@ -850,11 +859,17 @@ impl BarkLog {
             file.modified_ms
                 .map(|m| core::start_from_modified(m, analysis.duration_ms, file.utc_offset_min))
         });
-        let report = build_report(
-            &analysis,
-            &sensitivity.report_settings(analysis.duration_ms),
+        let mut analysis = analysis;
+        let settings = sensitivity.report_settings(analysis.duration_ms);
+        let report = finalize_report(
+            &mut analysis,
+            &settings,
             started_at,
             Some(file.display_name.clone()),
+            None,
+            &sensitivity,
+            self.personal().as_deref(),
+            &[],
         );
         let now = now_ms();
         Ok(self
@@ -863,6 +878,33 @@ impl BarkLog {
             .unwrap()
             .insert(&report, now, file.uri.as_deref(), Some(&analysis))?)
     }
+}
+
+/// Отчёт по окнам сессии: окна перерешиваются (порог, личная модель, отметки) и
+/// считается время чужих собак. `yamnet` нужен, только если порог мог измениться
+/// с момента анализа; для свежего анализа хватает `None`.
+#[allow(clippy::too_many_arguments)]
+fn finalize_report(
+    analysis: &mut core::Analysis,
+    settings: &ReportSettings,
+    started_at: Option<core::StartTime>,
+    source: Option<String>,
+    yamnet: Option<&Yamnet>,
+    sensitivity: &Sensitivity,
+    personal: Option<&PersonalModel>,
+    labels: &[core::EpisodeLabel],
+) -> core::Report {
+    let thresholds = sensitivity.thresholds();
+    let with = core::compact::Reclassify {
+        yamnet,
+        thresholds: &thresholds,
+        analyzed_dog_min: settings.windows_dog_min,
+        personal,
+    };
+    let foreign = core::compact::reclassify(analysis, &with, labels);
+    let mut report = build_report(analysis, settings, started_at, source);
+    report.stats.foreign_dog_ms = foreign as u64 * barklog_ml::PATCH_HOP_MS;
+    report
 }
 
 /// Префикс `source_uri` сессий, записанных в приложении: дальше — путь к фрагментам.
@@ -934,6 +976,8 @@ pub fn parse_live_snapshot(json: String) -> Result<LiveSnapshot> {
 pub struct LiveSession {
     recorder: Mutex<Option<LiveRecorder<Arc<Yamnet>>>>,
     store: Arc<Mutex<Store>>,
+    /// Личная модель на момент начала записи — чтобы посчитать чужих собак в отчёте.
+    personal: Option<Arc<PersonalModel>>,
 }
 
 #[uniffi::export]
@@ -970,12 +1014,17 @@ impl LiveSession {
         let started_at = rec.started_at();
         let sensitivity = rec.sensitivity();
         let dir = rec.clips_dir().to_string_lossy().into_owned();
-        let (analysis, _) = rec.finish().map_err(storage_error)?;
-        let report = build_report(
-            &analysis,
-            &sensitivity.report_settings(analysis.duration_ms),
+        let (mut analysis, _) = rec.finish().map_err(storage_error)?;
+        let settings = sensitivity.report_settings(analysis.duration_ms);
+        let report = finalize_report(
+            &mut analysis,
+            &settings,
             Some(started_at),
             Some("Запись в приложении".into()),
+            None,
+            &sensitivity,
+            self.personal.as_deref(),
+            &[],
         );
         let uri = format!("{CLIPS_URI_PREFIX}{dir}");
         Ok(self
@@ -1295,7 +1344,7 @@ mod tests {
 
         let status = bl.train_personal().unwrap();
         assert!(status.trained);
-        assert_eq!(status.samples, vec![30, 0, 0, 0, 30]);
+        assert_eq!(status.samples, vec![30, 0, 0, 0, 30, 0]);
         assert_eq!(status.labeled_episodes, 2);
 
         // Снимаем отметки — теперь классы решает только личная модель, и она уже знает разницу.
@@ -1388,6 +1437,15 @@ mod tests {
         let r = bl.get_report(id).unwrap();
         assert_eq!(r.episodes_count, 1);
         assert_eq!(r.dog_ms, 480);
+
+        // Одиночный гав — соседская собака: из голоса уходит, но учитывается отдельно.
+        let r = bl
+            .label_episode(id, 0, 480, Some(LabelKind::ForeignDog))
+            .unwrap();
+        assert_eq!(r.dog_ms, 0);
+        assert_eq!(r.foreign_dog_ms, 480);
+        let r = bl.label_episode(id, 0, 480, None).unwrap();
+        assert_eq!(r.foreign_dog_ms, 0);
 
         // Вне пределов — подрезается; настройка переживает перезапуск.
         let clamped = bl

@@ -17,17 +17,22 @@ pub enum Label {
     Whine,
     Howl,
     Growl,
-    /// Не собака или чужая собака (соседи, телевизор).
+    /// Не собака: телевизор, улица, бытовые звуки.
     NotDog,
+    /// Чужая собака — соседская, с улицы. Не голос своей собаки, но звучит почти
+    /// так же, поэтому для личной модели это отдельный класс, а не «не собака».
+    ForeignDog,
 }
 
 impl Label {
-    pub const ALL: [Label; 5] = [
+    /// Порядок — это номера классов в сохранённых моделях: новые только в конец.
+    pub const ALL: [Label; 6] = [
         Label::Bark,
         Label::Whine,
         Label::Howl,
         Label::Growl,
         Label::NotDog,
+        Label::ForeignDog,
     ];
 
     pub fn index(self) -> usize {
@@ -40,7 +45,7 @@ impl Label {
             Label::Whine => SoundClass::Whine,
             Label::Howl => SoundClass::Howl,
             Label::Growl => SoundClass::Growl,
-            Label::NotDog => SoundClass::Other,
+            Label::NotDog | Label::ForeignDog => SoundClass::Other,
         }
     }
 
@@ -51,6 +56,7 @@ impl Label {
             Label::Howl => "howl",
             Label::Growl => "growl",
             Label::NotDog => "not_dog",
+            Label::ForeignDog => "foreign_dog",
         }
     }
 
@@ -59,7 +65,7 @@ impl Label {
     }
 }
 
-const CLASSES: usize = 5;
+const CLASSES: usize = Label::ALL.len();
 /// Минимум для обучения: столько окон (по 0,48 с) и хотя бы два разных ответа.
 pub const MIN_SAMPLES: usize = 20;
 /// Больше этого на класс не берём — обучение должно занимать секунды и на телефоне.
@@ -99,8 +105,9 @@ impl PersonalModel {
         self.samples.iter().sum()
     }
 
-    /// Вероятности классов в порядке [`Label::ALL`].
-    pub fn probs(&self, embedding: &[f32]) -> [f32; CLASSES] {
+    /// Вероятности классов в порядке [`Label::ALL`]. У моделей, обученных до появления
+    /// новых классов, вектор короче — они просто не предсказывают новые классы.
+    pub fn probs(&self, embedding: &[f32]) -> Vec<f32> {
         let x: Vec<f32> = embedding
             .iter()
             .zip(&self.mean)
@@ -112,6 +119,12 @@ impl PersonalModel {
 
     /// Решение по окну: класс и уверенность.
     pub fn decide(&self, embedding: &[f32]) -> (SoundClass, f32) {
+        let (label, prob) = self.decide_label(embedding);
+        (label.class(), prob)
+    }
+
+    /// Решение по окну в терминах ответов: отличает «чужую собаку» от «не собаки».
+    pub fn decide_label(&self, embedding: &[f32]) -> (Label, f32) {
         let p = self.probs(embedding);
         let (best, prob) = p
             .iter()
@@ -119,7 +132,7 @@ impl PersonalModel {
             .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(i, &v)| (i, v))
             .expect("non-empty");
-        (Label::ALL[best].class(), prob)
+        (Label::ALL[best], prob)
     }
 }
 
@@ -271,10 +284,10 @@ fn fit(samples: &[&(Vec<f32>, Label)]) -> PersonalModel {
     }
 }
 
-fn logits(w: &[f32], b: &[f32], present: &[bool], x: &[f32]) -> [f32; CLASSES] {
+fn logits(w: &[f32], b: &[f32], present: &[bool], x: &[f32]) -> Vec<f32> {
     let d = x.len();
-    let mut z = [f32::NEG_INFINITY; CLASSES];
-    for k in 0..CLASSES {
+    let mut z = vec![f32::NEG_INFINITY; b.len()];
+    for k in 0..b.len() {
         if present[k] {
             z[k] = b[k]
                 + w[k * d..(k + 1) * d]
@@ -287,9 +300,9 @@ fn logits(w: &[f32], b: &[f32], present: &[bool], x: &[f32]) -> [f32; CLASSES] {
     z
 }
 
-fn softmax(z: &[f32; CLASSES]) -> [f32; CLASSES] {
+fn softmax(z: &[f32]) -> Vec<f32> {
     let max = z.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut e = [0f32; CLASSES];
+    let mut e = vec![0f32; z.len()];
     let mut sum = 0.0;
     for (o, &v) in e.iter_mut().zip(z) {
         *o = if v.is_finite() { (v - max).exp() } else { 0.0 };
@@ -331,7 +344,7 @@ mod tests {
         data.extend(blob(Label::Whine, 25, 2));
         data.extend(blob(Label::NotDog, 30, 3));
         let model = train(&data).unwrap();
-        assert_eq!(model.samples, vec![40, 25, 0, 0, 30]);
+        assert_eq!(model.samples, vec![40, 25, 0, 0, 30, 0]);
         assert!(model.accuracy.unwrap() > 0.9, "{:?}", model.accuracy);
         let fresh = blob(Label::Whine, 5, 99);
         for (x, _) in &fresh {
@@ -371,5 +384,34 @@ mod tests {
         for l in Label::ALL {
             assert_eq!(Label::from_key(l.key()), Some(l));
         }
+    }
+
+    #[test]
+    fn foreign_dog_is_its_own_class_but_not_my_dog() {
+        let mut data = blob(Label::Bark, 40, 1);
+        data.extend(blob(Label::ForeignDog, 40, 4));
+        data.extend(blob(Label::NotDog, 30, 3));
+        let model = train(&data).unwrap();
+        let foreign = blob(Label::ForeignDog, 3, 77);
+        assert_eq!(model.decide_label(&foreign[0].0).0, Label::ForeignDog);
+        assert_eq!(model.decide(&foreign[0].0).0, SoundClass::Other);
+        assert_eq!(model.samples.len(), Label::ALL.len());
+    }
+
+    #[test]
+    fn model_from_before_foreign_dog_still_works() {
+        let mut data = blob(Label::Bark, 30, 1);
+        data.extend(blob(Label::NotDog, 30, 2));
+        let mut old = train(&data).unwrap();
+        // Модель прежней версии: пять классов, без «чужой собаки».
+        let five = Label::ForeignDog.index();
+        old.weights.truncate(five * EMBEDDING_SIZE);
+        old.bias.truncate(five);
+        old.present.truncate(five);
+        old.samples.truncate(five);
+        let old: PersonalModel =
+            serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(old.probs(&data[0].0).len(), five);
+        assert_eq!(old.decide(&data[0].0).0, SoundClass::Bark);
     }
 }

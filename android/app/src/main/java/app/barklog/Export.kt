@@ -249,6 +249,12 @@ object Export {
                     .joinToString(" · ") { "${Fmt.label(it.kind).lowercase()} ${Fmt.percent(it.dogPercent!!)}" }
                 para("Среди голоса собаки: $dog", paint(8.5f, text2))
             }
+            if (r.foreignDogMs > 0uL) {
+                para(
+                    "Чужие собаки — ${Fmt.duration(r.foreignDogMs)}; в голос этой собаки не входят, учтены в «других звуках».",
+                    paint(8.5f, text2),
+                )
+            }
         }
 
         private fun hours(r: SessionReport) {
@@ -308,6 +314,7 @@ object Export {
             LabelKind.HOWL -> "вой"
             LabelKind.GROWL -> "рычание"
             LabelKind.NOT_DOG -> "не собака"
+            LabelKind.FOREIGN_DOG -> "чужая собака"
         }
 
         companion object {
