@@ -182,8 +182,11 @@ fun Timeline(
             if (bins.isEmpty()) return@Canvas
             val bw = w / bins.size
             val gap = if (bins.size <= 120) bw * 0.18f else 0f
+            // Зазор между сегментами одного столбца — граница видна и без различия цвета.
+            val seam = 2.dp.toPx()
             fractions.forEachIndexed { i, parts ->
                 var top = h
+                var below = false
                 if (i == selected) {
                     drawRect(c.raised, Offset(i * bw, 0f), Size(bw, h))
                 }
@@ -191,11 +194,14 @@ fun Timeline(
                     if (f <= 0f) return@forEachIndexed
                     val bh = (f / scale * h).coerceAtMost(top)
                     top -= bh
+                    // Сегмент поверх другого отдаёт низ под зазор, если сам выше зазора.
+                    val cut = if (below && bh > seam * 2) seam else 0f
                     drawRect(
                         c.of(DOG_KINDS[k]),
                         Offset(i * bw + gap / 2, top),
-                        Size((bw - gap).coerceAtLeast(1f), bh),
+                        Size((bw - gap).coerceAtLeast(1f), bh - cut),
                     )
+                    below = true
                 }
             }
         }
