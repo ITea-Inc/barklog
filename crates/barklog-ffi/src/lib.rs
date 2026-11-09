@@ -14,7 +14,8 @@ use barklog_core::{
 };
 use barklog_ml::Yamnet;
 use barklog_store::{FIRST_DOG, Store, personal_model_name};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 mod csv;
 
@@ -448,6 +449,8 @@ pub struct BarkLog {
     sensitivity: RwLock<Sensitivity>,
     /// Чьи записи показываются и к кому идут новые.
     current_dog: RwLock<i64>,
+    /// Папки идущих сейчас живых записей — их восстановление не трогает.
+    active_live: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 const SENSITIVITY: &str = "sensitivity";
@@ -486,6 +489,7 @@ impl BarkLog {
             personal: RwLock::new(HashMap::new()),
             sensitivity: RwLock::new(sensitivity),
             current_dog: RwLock::new(current_dog),
+            active_live: Arc::new(Mutex::new(HashSet::new())),
         }))
     }
 
@@ -596,12 +600,16 @@ impl BarkLog {
             &dir,
         )
         .map_err(storage_error)?
-        .with_personal(self.personal());
+        .with_personal(self.personal())
+        .with_tag(Some(dog_tag(self.dog())));
+        self.active_live.lock().unwrap().insert(dir.clone());
         Ok(Arc::new(LiveSession {
             recorder: Mutex::new(Some(recorder)),
             store: self.store.clone(),
             personal: self.personal(),
             dog_id: self.dog(),
+            dir,
+            active_live: self.active_live.clone(),
         }))
     }
 
@@ -809,6 +817,65 @@ impl BarkLog {
             return Err(BarkLogError::NotFound);
         }
         self.recompute(session_id)
+    }
+
+    /// Сохраняет живые записи, прерванные сбоем (систему убила приложение, сел
+    /// телефон): всё, что успело попасть в контрольную точку. `clips_root` — та же
+    /// папка, что и в [`Self::start_live`]. Идущие сейчас записи не трогает.
+    /// Возвращает id сохранённых сессий.
+    pub fn recover_live(&self, clips_root: String) -> Result<Vec<i64>> {
+        let Ok(entries) = std::fs::read_dir(&clips_root) else {
+            return Ok(Vec::new());
+        };
+        let active = self.active_live.lock().unwrap().clone();
+        let dogs: Vec<i64> = self
+            .store
+            .lock()
+            .unwrap()
+            .dogs()?
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        let mut ids = Vec::new();
+        for dir in entries.flatten().map(|e| e.path()) {
+            if active.contains(&dir) || !core::checkpoint::exists(&dir) {
+                continue;
+            }
+            let Some(rec) = core::checkpoint::recover(&dir).map_err(storage_error)? else {
+                continue;
+            };
+            if !rec.analysis.windows.is_empty() {
+                // Собаку могли удалить, пока запись лежала прерванной — тогда первой.
+                let dog = rec
+                    .tag
+                    .as_deref()
+                    .and_then(parse_dog_tag)
+                    .filter(|d| dogs.contains(d))
+                    .unwrap_or(FIRST_DOG);
+                let mut analysis = rec.analysis;
+                let settings = rec.sensitivity.report_settings(analysis.duration_ms);
+                let report = finalize_report(
+                    &mut analysis,
+                    &settings,
+                    Some(rec.started_at),
+                    Some("Запись в приложении — прервана".into()),
+                    None,
+                    &rec.sensitivity,
+                    self.personal_for(dog)?.as_deref(),
+                    &[],
+                );
+                let uri = format!("{CLIPS_URI_PREFIX}{}", dir.to_string_lossy());
+                ids.push(self.store.lock().unwrap().insert_for_dog(
+                    dog,
+                    &report,
+                    now_ms(),
+                    Some(&uri),
+                    Some(&analysis),
+                )?);
+            }
+            core::checkpoint::discard(&dir).map_err(storage_error)?;
+        }
+        Ok(ids)
     }
 
     pub fn delete_session(&self, id: i64) -> Result<bool> {
@@ -1066,6 +1133,15 @@ fn finalize_report(
     report
 }
 
+/// Метка собаки в контрольной точке живой записи.
+fn dog_tag(dog: i64) -> String {
+    format!("dog:{dog}")
+}
+
+fn parse_dog_tag(tag: &str) -> Option<i64> {
+    tag.strip_prefix("dog:")?.parse().ok()
+}
+
 /// Имя собаки без пробелов по краям, не пустое и не длиннее [`MAX_DOG_NAME_CHARS`].
 fn dog_name(name: &str) -> Result<String> {
     let name: String = name.trim().chars().take(MAX_DOG_NAME_CHARS).collect();
@@ -1150,6 +1226,8 @@ pub struct LiveSession {
     personal: Option<Arc<PersonalModel>>,
     /// Чья запись — собака, выбранная при старте.
     dog_id: i64,
+    dir: PathBuf,
+    active_live: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 #[uniffi::export]
@@ -1199,13 +1277,17 @@ impl LiveSession {
             &[],
         );
         let uri = format!("{CLIPS_URI_PREFIX}{dir}");
-        Ok(self.store.lock().unwrap().insert_for_dog(
+        let id = self.store.lock().unwrap().insert_for_dog(
             self.dog_id,
             &report,
             now_ms(),
             Some(&uri),
             Some(&analysis),
-        )?)
+        )?;
+        // Сессия сохранена — контрольная точка больше не нужна (звук остаётся).
+        let _ = core::checkpoint::discard(&self.dir);
+        self.active_live.lock().unwrap().remove(&self.dir);
+        Ok(id)
     }
 }
 
@@ -1708,5 +1790,69 @@ mod tests {
         assert!(bl.select_dog(rex.id).is_err());
         drop(bl);
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn recovers_live_recording_after_crash() {
+        let Some(model) = model_path() else { return };
+        let base = std::env::temp_dir().join(format!("barklog-ffi-crash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = base.join("db.sqlite").to_string_lossy().into_owned();
+        let clips = base.join("clips").to_string_lossy().into_owned();
+
+        let bl = BarkLog::new(db.clone(), model.clone()).unwrap();
+        let rex = bl.add_dog("Рекс".into()).unwrap();
+        bl.select_dog(rex.id).unwrap();
+        let live = bl.start_live(16_000, 180, clips.clone()).unwrap();
+        // 40 с тихого шума — на это время приходится контрольная точка.
+        let mut state = 7u32;
+        let pcm: Vec<u8> = (0..16_000 * 40)
+            .flat_map(|_| {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (((state >> 16) as i16) / 64).to_le_bytes()
+            })
+            .collect();
+        for chunk in pcm.chunks(3_200) {
+            live.push_pcm16(chunk.to_vec()).unwrap();
+        }
+        // Идущую запись восстановление не трогает.
+        assert!(bl.recover_live(clips.clone()).unwrap().is_empty());
+
+        // Процесс убит: finish не вызван, приложение запускается заново.
+        drop(live);
+        drop(bl);
+        let bl = BarkLog::new(db.clone(), model.clone()).unwrap();
+        let ids = bl.recover_live(clips.clone()).unwrap();
+        assert_eq!(ids.len(), 1);
+        let r = bl.get_report(ids[0]).unwrap();
+        assert!(
+            r.duration_ms >= 25_000 && r.duration_ms <= 40_000,
+            "{}",
+            r.duration_ms
+        );
+        assert!(r.source_name.contains("прервана"));
+        assert!(r.editable, "окна восстановлены — запись можно размечать");
+        assert_eq!(bl.current_dog(), rex.id);
+        assert_eq!(
+            bl.list_sessions().unwrap().len(),
+            1,
+            "запись досталась Рексу"
+        );
+        // Второй раз ту же запись не сохраняем.
+        assert!(bl.recover_live(clips.clone()).unwrap().is_empty());
+
+        // Обычная запись после finish не оставляет, что восстанавливать.
+        let live = bl.start_live(16_000, 180, clips.clone()).unwrap();
+        for chunk in pcm.chunks(3_200) {
+            live.push_pcm16(chunk.to_vec()).unwrap();
+        }
+        live.finish().unwrap();
+        drop(bl);
+        let bl = BarkLog::new(db, model).unwrap();
+        assert!(bl.recover_live(clips).unwrap().is_empty());
+        assert_eq!(bl.list_sessions().unwrap().len(), 2);
+        drop(bl);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

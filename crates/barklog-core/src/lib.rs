@@ -1,5 +1,6 @@
 //! Ядро BarkLog: пайплайн анализа, эпизоды и статистика.
 
+pub mod checkpoint;
 pub mod classify;
 pub mod clips;
 pub mod compact;

@@ -8,6 +8,7 @@ use barklog_audio::{Resampler, TARGET_RATE};
 use barklog_ml::{PATCH_WINDOW_MS, Yamnet};
 use serde::{Deserialize, Serialize};
 
+use crate::checkpoint::CheckpointWriter;
 use crate::clips::{ClipIndex, ClipWriter};
 use crate::pipeline::{Analysis, StreamAnalyzer};
 use crate::report::{Report, StartTime, build_report};
@@ -21,8 +22,9 @@ const CLIP_PAD_MS: u64 = 1_000;
 const NOW_WINDOW_MS: u64 = 10_000;
 /// Окно для «за последние N минут».
 const RECENT_MS: u64 = 15 * 60_000;
-/// Индекс фрагментов сохраняется не реже, чем раз в столько звука.
-const INDEX_SAVE_MS: u64 = 60_000;
+/// Индекс фрагментов и контрольная точка анализа сохраняются раз в столько звука:
+/// если систему убьёт приложение, потеряется не больше этого.
+const INDEX_SAVE_MS: u64 = 30_000;
 
 /// Состояние живой записи — для экрана записи и для отправки на другой телефон.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +104,7 @@ pub struct LiveRecorder<M: Borrow<Yamnet>> {
     /// Отсчётов получено с микрофона (до ресемплинга — у него есть небольшая задержка).
     input_samples: u64,
     clips: ClipWriter,
+    checkpoint: CheckpointWriter,
     started_at: StartTime,
     sensitivity: Sensitivity,
     resampled: Vec<f32>,
@@ -119,18 +122,26 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
         started_at: StartTime,
         clips_dir: impl AsRef<Path>,
     ) -> std::io::Result<Self> {
+        let checkpoint = CheckpointWriter::create(&clips_dir, started_at, sensitivity)?;
         Ok(Self {
             analyzer: StreamAnalyzer::new(model, sensitivity.thresholds()).with_batch(LIVE_BATCH),
             resampler: Resampler::new(input_rate, TARGET_RATE),
             input_rate,
             input_samples: 0,
             clips: ClipWriter::create(clips_dir)?,
+            checkpoint,
             started_at,
             sensitivity,
             resampled: Vec::new(),
             seen_windows: 0,
             last_index_save_ms: 0,
         })
+    }
+
+    /// Метка в контрольной точке — по ней после сбоя понятно, чья это запись.
+    pub fn with_tag(mut self, tag: Option<String>) -> Self {
+        self.checkpoint.set_tag(tag);
+        self
     }
 
     /// Личная модель для уточнения классов (см. [`crate::personal`]).
@@ -176,6 +187,11 @@ impl<M: Borrow<Yamnet>> LiveRecorder<M> {
         if processed >= self.last_index_save_ms + INDEX_SAVE_MS {
             self.last_index_save_ms = processed;
             self.clips.save_index()?;
+            self.checkpoint.write(
+                self.analyzer.windows(),
+                self.analyzer.embeddings(),
+                self.analyzer.covered_ms(),
+            )?;
         }
         Ok(())
     }
@@ -317,8 +333,18 @@ mod tests {
             json.len()
         );
 
+        // Через 30 с звука появляется контрольная точка — запись переживёт сбой.
+        for _ in 0..150 {
+            rec.push_pcm16(&chunk).unwrap();
+        }
+        let recovered = crate::checkpoint::recover(&dir)
+            .unwrap()
+            .expect("точка записана");
+        assert!(recovered.analysis.duration_ms >= 25_000);
+        assert!(!recovered.analysis.windows.is_empty());
+
         let (analysis, index) = rec.finish().unwrap();
-        assert_eq!(analysis.duration_ms, 20_000);
+        assert_eq!(analysis.duration_ms, 35_000);
         assert!(index.segments.is_empty(), "тишину не сохраняем");
         let _ = std::fs::remove_dir_all(&dir);
     }

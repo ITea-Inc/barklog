@@ -141,16 +141,24 @@ impl<M: Borrow<Yamnet>> StreamAnalyzer<M> {
         }
     }
 
+    /// Эмбеддинги, накопленные на этот момент (только добавляются).
+    pub fn embeddings(&self) -> &[(u32, Embedding)] {
+        &self.embeddings
+    }
+
+    /// До какого места запись уже разобрана: конец последнего готового окна.
+    pub fn covered_ms(&self) -> u64 {
+        self.windows
+            .last()
+            .map(|w| (w.start_ms + PATCH_HOP_MS).min(self.processed_ms()))
+            .unwrap_or(0)
+    }
+
     /// Текущее состояние без завершения потока: окна, готовые на этот момент.
     /// Длительность — до конца последнего окна (звук, ещё не прошедший сеть, не учитывается).
     pub fn snapshot(&self) -> Analysis {
-        let covered = self
-            .windows
-            .last()
-            .map(|w| (w.start_ms + PATCH_HOP_MS).min(self.processed_ms()))
-            .unwrap_or(0);
         Analysis {
-            duration_ms: covered,
+            duration_ms: self.covered_ms(),
             windows: self.windows.clone(),
             embeddings: Vec::new(),
         }
