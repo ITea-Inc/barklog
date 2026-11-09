@@ -73,6 +73,8 @@ fun SessionsScreen(
     val remote by vm.remoteLive.collectAsStateWithLifecycle()
     val personal by vm.personal.collectAsStateWithLifecycle()
     val training by vm.training.collectAsStateWithLifecycle()
+    val dogs by vm.dogs.collectAsStateWithLifecycle()
+    val currentDog by vm.currentDog.collectAsStateWithLifecycle()
     val c = Bark.colors
     val context = LocalContext.current
 
@@ -136,6 +138,8 @@ fun SessionsScreen(
             }
             Spacer(Modifier.height(24.dp))
             Text("Записи", style = Bark.type.title)
+            Spacer(Modifier.height(4.dp))
+            DogSwitcher(dogs, currentDog, onSelect = vm::selectDog, onAdd = vm::addDog)
             Spacer(Modifier.height(8.dp))
             Text(
                 "Уходя, включите запись и оставьте телефон рядом с собакой — " +

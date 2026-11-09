@@ -48,6 +48,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     val saved by vm.sensitivity.collectAsStateWithLifecycle()
     val applying by vm.applying.collectAsStateWithLifecycle()
     val personal by vm.personal.collectAsStateWithLifecycle()
+    val dogs by vm.dogs.collectAsStateWithLifecycle()
     val limits = vm.sensitivityLimits
 
     Column(
@@ -75,6 +76,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             style = Bark.type.subtitle,
         )
         Spacer(Modifier.height(24.dp))
+
+        if (dogs.isNotEmpty()) {
+            DogsPanel(dogs, onRename = vm::renameDog, onDelete = vm::deleteDog)
+            Spacer(Modifier.height(12.dp))
+        }
 
         val current = saved ?: return@Column
         // Черновик живёт до «Применить»: пересчёт всех записей небыстрый, на каждое движение — не годится.

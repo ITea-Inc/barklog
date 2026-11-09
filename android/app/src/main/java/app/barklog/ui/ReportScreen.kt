@@ -40,6 +40,7 @@ import uniffi.barklog_ffi.LabelKind
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.text.BasicTextField
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -75,8 +76,20 @@ fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () 
             report?.let { r ->
                 Box {
                     var menu by remember { mutableStateOf(false) }
+                    var moving by remember { mutableStateOf(false) }
+                    val dogs by vm.dogs.collectAsStateWithLifecycle()
+                    val currentDog by vm.currentDog.collectAsStateWithLifecycle()
                     TextButton(onClick = { menu = true }) {
-                        Text("Поделиться", style = Bark.type.body.copy(color = c.text2))
+                        Text("Ещё", style = Bark.type.body.copy(color = c.text2))
+                    }
+                    val dog = currentDog
+                    if (moving && dog != null) {
+                        MoveSessionDialog(
+                            dogs,
+                            dog,
+                            onDismiss = { moving = false },
+                            onMove = { to -> moving = false; vm.moveSession(r.id, to); onBack() },
+                        )
                     }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(
@@ -87,6 +100,12 @@ fun ReportScreen(vm: MainViewModel, id: Long, onBack: () -> Unit, onDeleted: () 
                             text = { Text("Таблица эпизодов CSV", style = Bark.type.body) },
                             onClick = { menu = false; vm.shareEpisodesCsv(r) },
                         )
+                        if (dogs.size > 1) {
+                            DropdownMenuItem(
+                                text = { Text("Перенести к другой собаке", style = Bark.type.body) },
+                                onClick = { menu = false; moving = true },
+                            )
+                        }
                     }
                 }
             }

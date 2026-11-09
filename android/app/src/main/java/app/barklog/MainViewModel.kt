@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.barklog_ffi.BarkLogException
+import uniffi.barklog_ffi.DogInfo
 import uniffi.barklog_ffi.LabelKind
 import uniffi.barklog_ffi.PersonalStatus
 import uniffi.barklog_ffi.SensitivityLimits
@@ -233,10 +234,56 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Собаки и текущая — чьи записи на экране и к кому идут новые. */
+    private val _dogs = MutableStateFlow<List<DogInfo>>(emptyList())
+    val dogs: StateFlow<List<DogInfo>> = _dogs.asStateFlow()
+
+    private val _currentDog = MutableStateFlow<Long?>(null)
+    val currentDog: StateFlow<Long?> = _currentDog.asStateFlow()
+
+    fun selectDog(id: Long) {
+        hideFinishedAnalysis()
+        dogAction { selectDog(id) }
+    }
+
+    /** Добавляет собаку и сразу переключается на неё. */
+    fun addDog(name: String) {
+        hideFinishedAnalysis()
+        dogAction { selectDog(addDog(name).id) }
+    }
+
+    /** Карточка «Готово — открыть отчёт» относится к записи прежней собаки — убираем её. */
+    private fun hideFinishedAnalysis() {
+        analysis.value?.takeIf { it.state.isFinished }?.let { _dismissed.value = it.id }
+    }
+
+    fun renameDog(id: Long, name: String) = dogAction { renameDog(id, name) }
+
+    fun deleteDog(id: Long) = dogAction { deleteDog(id) }
+
+    /** Переносит запись к другой собаке (из списка текущей она пропадёт). */
+    fun moveSession(sessionId: Long, dogId: Long) = dogAction { moveSession(sessionId, dogId) }
+
+    private fun dogAction(action: uniffi.barklog_ffi.BarkLog.() -> Unit) {
+        viewModelScope.launch {
+            try {
+                val core = barkApp.core()
+                withContext(Dispatchers.IO) { core.action() }
+            } catch (e: BarkLogException) {
+                _error.value = e.cleanMessage()
+            }
+            refresh()
+        }
+    }
+
     fun refresh() {
         viewModelScope.launch {
             try {
                 val core = barkApp.core()
+                withContext(Dispatchers.IO) {
+                    _dogs.value = core.dogs()
+                    _currentDog.value = core.currentDog()
+                }
                 _sessions.value = withContext(Dispatchers.IO) { core.listSessions() }
                 refreshPersonal()
             } catch (e: BarkLogException) {
