@@ -46,3 +46,6 @@ android/app/google-services.json
 firebase/functions/node_modules/
 firebase/.firebaserc
 firebase/*-debug.log
+
+# Планы — локальные, в репозиторий не кладём
+/docs/PLAN.md
