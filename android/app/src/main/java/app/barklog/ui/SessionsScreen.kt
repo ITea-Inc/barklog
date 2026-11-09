@@ -67,6 +67,7 @@ fun SessionsScreen(
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val analysis by vm.analysis.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
+    val notice by vm.notice.collectAsStateWithLifecycle()
     val dismissed by vm.dismissedAnalysis.collectAsStateWithLifecycle()
     val live by vm.live.collectAsStateWithLifecycle()
     val account by vm.account.collectAsStateWithLifecycle()
@@ -164,6 +165,17 @@ fun SessionsScreen(
                 Panel(Modifier.fillMaxWidth()) {
                     Text(message, style = Bark.type.body.copy(color = c.danger))
                     TextButton(onClick = vm::dismissError) { Text("Скрыть", color = c.text2) }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+
+        notice?.let { message ->
+            item {
+                Panel(Modifier.fillMaxWidth()) {
+                    Text(message, style = Bark.type.body)
+                    Spacer(Modifier.height(12.dp))
+                    TextLink("Понятно", c.text2, vm::dismissNotice)
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -465,11 +477,13 @@ private fun SessionRow(s: SessionSummary, onClick: () -> Unit) {
     } else {
         s.sourceName
     }
-    val subtitle = if (s.dogMs == 0uL) {
+    val voice = if (s.dogMs == 0uL) {
         "Собаку не слышно"
     } else {
         "Голос ${Fmt.duration(s.dogMs)} · ${Fmt.percent(s.dogPercent)} · ${Fmt.episodes(s.episodes.toInt())}"
     }
+    // Восстановленная после сбоя запись неполная — так и пишем.
+    val subtitle = if (s.sourceName.endsWith("прервана")) "$voice · прервана" else voice
     Row(
         Modifier
             .fillMaxWidth()

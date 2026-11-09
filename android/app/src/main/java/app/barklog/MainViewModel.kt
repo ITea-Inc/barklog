@@ -155,8 +155,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _applying = MutableStateFlow(false)
     val applying: StateFlow<Boolean> = _applying.asStateFlow()
 
+    /** Сообщение не об ошибке — например, что прерванная запись восстановлена. */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    fun dismissNotice() {
+        _notice.value = null
+    }
+
+    /** Сохраняет живые записи, прерванные сбоем (систему закрыла приложение, сел телефон). */
+    private fun recoverInterrupted() {
+        viewModelScope.launch {
+            try {
+                val core = barkApp.core()
+                val root = java.io.File(barkApp.filesDir, "clips")
+                val ids = withContext(Dispatchers.IO) { core.recoverLive(root.absolutePath) }
+                if (ids.isNotEmpty()) {
+                    _notice.value = (if (ids.size == 1) "Запись прервалась" else "Записи прервались (${ids.size})") +
+                        " — похоже, система закрыла приложение. Всё, что успели разобрать, сохранено: " +
+                        "в списке такая запись помечена «прервана». Чтобы это не повторялось, " +
+                        "отключите для BarkLog оптимизацию батареи в настройках телефона"
+                    refresh()
+                }
+            } catch (e: BarkLogException) {
+                _error.value = e.cleanMessage()
+            }
+        }
+    }
+
     init {
         refresh()
+        recoverInterrupted()
         viewModelScope.launch {
             runCatching {
                 val core = barkApp.core()
